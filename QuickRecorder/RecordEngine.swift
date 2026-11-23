@@ -141,6 +141,10 @@ extension AppDelegate {
         SCContext.timeOffset = CMTimeMake(value: 0, timescale: 0)
         SCContext.isPaused = false
         SCContext.isResume = false
+        SCContext.pauseStartTime = nil
+        SCContext.totalMicPausedSeconds = 0
+        SCContext.timePassed = 0
+        PopoverState.shared.isPaused = false
         
         let audioOnly = SCContext.streamType == .systemaudio
         
@@ -290,7 +294,7 @@ extension AppDelegate {
                 initVideo(conf: conf)
             } else {
                 //SCContext.startTime = Date.now
-                if recordMic { startMicRecording() }
+                if SCContext.activeSessionRecordsMic { startMicRecording() }
             }
             try await SCContext.stream.startCapture()
         } catch {
@@ -315,7 +319,8 @@ extension AppDelegate {
             default: assertionFailure("loaded unknown audio format: ".local + fileEnding)
         }
         let path = SCContext.getFilePath()
-        if recordMic && SCContext.streamType == .systemaudio {
+        SCContext.activeSessionRecordsMic = recordMic && SCContext.streamType == .systemaudio
+        if SCContext.activeSessionRecordsMic {
             SCContext.filePath = "\(path).qma"
             SCContext.filePath1 = "\(path).qma/sys.\(fileEnding)"
             SCContext.filePath2 = "\(path).qma/mic.\(fileEnding)"
@@ -324,11 +329,12 @@ extension AppDelegate {
             try? fd.createDirectory(at: SCContext.filePath.url, withIntermediateDirectories: true, attributes: nil)
             try? jsonString.write(to: infoJsonURL, atomically: true, encoding: .utf8)
             
-            SCContext.audioFile = try! AVAudioFile(forWriting: SCContext.filePath1.url, settings: SCContext.updateAudioSettings(), commonFormat: .pcmFormatFloat32, interleaved: false)
+            SCContext.openSystemAudioFile(at: SCContext.filePath1.url, settings: SCContext.updateAudioSettings())
 
             let sampleRate = SCContext.getSampleRate() ?? 48000
             let settings = SCContext.updateAudioSettings(rate: sampleRate)
             SCContext.vW = try? AVAssetWriter.init(outputURL: SCContext.filePath2.url, fileType: fileType)
+            SCContext.vW?.movieFragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
             SCContext.micInput = AVAssetWriterInput(mediaType: AVMediaType.audio, outputSettings: settings)
             SCContext.micInput.expectsMediaDataInRealTime = true
             if SCContext.vW.canAdd(SCContext.micInput) { SCContext.vW.add(SCContext.micInput) }
@@ -337,7 +343,7 @@ extension AppDelegate {
         } else {
             SCContext.filePath = "\(path).\(fileEnding)"
             SCContext.filePath1 = SCContext.filePath
-            SCContext.audioFile = try! AVAudioFile(forWriting: SCContext.filePath.url, settings: SCContext.updateAudioSettings(), commonFormat: .pcmFormatFloat32, interleaved: false)
+            SCContext.openSystemAudioFile(at: SCContext.filePath.url, settings: SCContext.updateAudioSettings())
         }
     }
 }
@@ -376,6 +382,7 @@ extension AppDelegate {
             SCContext.filePath = "\(SCContext.getFilePath()).\(fileEnding)"
         }
         SCContext.vW = try? AVAssetWriter.init(outputURL: SCContext.filePath.url, fileType: fileType!)
+        SCContext.vW?.movieFragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
         let encoderIsH265 = (encoder.rawValue == Encoder.h265.rawValue) || recordHDR
         let fpsMultiplier: Double = Double(frameRate)/8
         let encoderMultiplier: Double = encoderIsH265 ? 0.5 : 0.9
@@ -423,6 +430,7 @@ extension AppDelegate {
             if SCContext.vW.canAdd(SCContext.awInput) { SCContext.vW.add(SCContext.awInput) }
         }
 
+        SCContext.activeSessionRecordsMic = recordMic
         if recordMic {
             let sampleRate = SCContext.getSampleRate() ?? 48000
             let settings = SCContext.updateAudioSettings(rate: sampleRate)
@@ -606,8 +614,7 @@ extension AppDelegate {
                 }
                 if SCContext.startTime == nil { SCContext.startTime = Date.now }
                 guard let samples = SampleBuffer.asPCMBuffer else { return }
-                do { try SCContext.audioFile?.write(from: samples) }
-                catch { assertionFailure("audio file writing issue".local) }
+                SCContext.writeSystemAudioSamples(samples)
             } else {
                 if SCContext.lastPTS == nil { return }
                 if SCContext.awInput.isReadyForMoreMediaData { SCContext.awInput.append(SampleBuffer) }
@@ -691,7 +698,12 @@ class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         if SCContext.isPaused || SCContext.startTime == nil { return }
         if SCContext.micInput.isReadyForMoreMediaData {
-            SCContext.micInput.append(sampleBuffer)
+            if SCContext.streamType == .systemaudio && SCContext.totalMicPausedSeconds > 0,
+               let shifted = SCContext.adjustTime(sample: sampleBuffer, by: CMTime(seconds: SCContext.totalMicPausedSeconds, preferredTimescale: 48000)) {
+                SCContext.micInput.append(shifted)
+            } else {
+                SCContext.micInput.append(sampleBuffer)
+            }
         }
     }
 }
@@ -740,9 +752,16 @@ extension AVAudioPCMBuffer {
             formatDescriptionOut: &format
         ) == noErr else { return nil }
 
+        let rawHostPTS = CMClockGetTime(CMClockGetHostTimeClock())
+        let adjustedPTS: CMTime
+        if SCContext.streamType == .systemaudio && SCContext.totalMicPausedSeconds > 0 {
+            adjustedPTS = CMTimeSubtract(rawHostPTS, CMTime(seconds: SCContext.totalMicPausedSeconds, preferredTimescale: 48000))
+        } else {
+            adjustedPTS = rawHostPTS
+        }
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: Int32(asbd.pointee.mSampleRate)),
-            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+            presentationTimeStamp: adjustedPTS,
             decodeTimeStamp: .invalid
         )
 

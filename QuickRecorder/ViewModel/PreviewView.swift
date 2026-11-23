@@ -135,6 +135,10 @@ struct PreviewView: View {
                     Divider()
                 }
             }
+            Button("Open Main Panel") {
+                closeWindow()
+                AppDelegate.shared.presentMainPanel(belowSettings: false, activateApp: true)
+            }
             Button("Close") { closeWindow() }
         }
     }
@@ -148,7 +152,7 @@ struct PreviewView: View {
     private func closeWindow() {
         withAnimation(.easeIn(duration: 0.2)) { opacity = 0.0 }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            nsWindow?.close()
+            nsWindow?.orderOut(nil)
         }
     }
     

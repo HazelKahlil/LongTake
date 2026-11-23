@@ -185,13 +185,24 @@ class recordAudio: NSScriptCommand {
         }
         SCContext.updateAvailableContent {
             DispatchQueue.main.async {
-                let m = UserDefaults.standard.bool(forKey: "recordMic")
-                if let mic = self.evaluatedArguments!["mic"] as? Bool {
+                if let mic = self.evaluatedArguments?["mic"] as? Bool {
                     UserDefaults.standard.set(mic, forKey: "recordMic")
                 }
                 closeAllWindow()
                 AppDelegate.shared.prepRecord(type: "audio", screens: SCContext.getSCDisplayWithMouse(), windows: nil, applications: nil)
-                UserDefaults.standard.set(m, forKey: "recordMic")
+            }
+        }
+        return nil
+    }
+}
+
+class stopRecordingCommand: NSScriptCommand {
+    override func performDefaultImplementation() -> Any? {
+        DispatchQueue.main.async {
+            if SCContext.streamType == .idevice {
+                AVOutputClass.shared.stopRecording()
+            } else {
+                SCContext.stopRecording()
             }
         }
         return nil

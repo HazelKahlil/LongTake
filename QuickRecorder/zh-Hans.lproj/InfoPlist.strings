@@ -5,6 +5,8 @@
   Created by apple on 2024/4/28.
   
 */
-"NSMicrophoneUsageDescription" = "QuickRecorder 需要使用此权限以录制来自麦克风的声音.";
-"NSCameraUsageDescription" = "QuickRecorder 需要使用此权限以录制来自摄像头或移动设备的画面.";
+"CFBundleName" = "LongTake";
+"CFBundleDisplayName" = "LongTake";
+"NSMicrophoneUsageDescription" = "LongTake 需要麦克风权限以录制人声与会议对话。";
+"NSCameraUsageDescription" = "LongTake 需要摄像头权限以录制画面或连接外部设备。";
 "NSHumanReadableCopyright" = "版权所有 © 2024 lihaoyun6. 保留所有权利.";

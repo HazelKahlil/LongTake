@@ -28,24 +28,28 @@ var keyMonitor: Any?
 var hideMousePointer = false
 var hideScreenMagnifier = false
 let updateTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+final class FloatingHUDPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 let mousePointer = NSWindow(contentRect: NSRect(x: -70, y: -70, width: 70, height: 70), styleMask: [.borderless], backing: .buffered, defer: false)
 let screenMagnifier = NSWindow(contentRect: NSRect(x: -402, y: -402, width: 402, height: 348), styleMask: [.borderless], backing: .buffered, defer: false)
 let camWindow = NSPanel(contentRect: NSRect(x: 200, y: 200, width: 200, height: 200), styleMask: [.fullSizeContentView, .resizable, .nonactivatingPanel], backing: .buffered, defer: false)
 let deviceWindow = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 200, height: 200), styleMask: [.fullSizeContentView, .resizable], backing: .buffered, defer: false)
-let controlPanel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10), styleMask: [.fullSizeContentView], backing: .buffered, defer: false)
-let countdownPanel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 120, height: 120), styleMask: [.fullSizeContentView], backing: .buffered, defer: false)
-let previewWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 266, height: 156), styleMask: [.fullSizeContentView], backing: .buffered, defer: false)
+let controlPanel = FloatingHUDPanel(contentRect: NSRect(x: 0, y: 0, width: 372, height: 60), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+let countdownPanel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 120, height: 120), styleMask: [.borderless], backing: .buffered, defer: false)
+let previewWindow = FloatingHUDPanel(contentRect: NSRect(x: 0, y: 0, width: 266, height: 156), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+let savingHUDPanel = FloatingHUDPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 52), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
 var updaterController: SPUStandardUpdaterController!
 
 @main
 struct QuickRecorderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    //private let updaterController: SPUStandardUpdaterController
         
     init() {
-        // If you want to start the updater manually, pass false to startingUpdater and call .startUpdater() later
-        // This is where you can also pass an updater delegate if you need one
-        updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        // 本地定制版禁用 Sparkle 自动启动轮询, 防止被上游 QuickRecorder 覆盖导致 28B 缺陷复活
+        updaterController = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
     }
     
     var body: some Scene {
@@ -87,9 +91,6 @@ struct QuickRecorderApp: App {
         .handlesExternalEvents(matching: [])
         .commands {
             CommandGroup(replacing: .newItem) {}
-            CommandGroup(after: .appInfo) {
-                CheckForUpdatesView(updater: updaterController.updater)
-            }
         }
     }
 }
@@ -107,6 +108,7 @@ extension Scene {
 
 class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOutput, AVCaptureVideoDataOutputSampleBufferDelegate  {
     static let shared = AppDelegate()
+    var mainPanelWindow: EscPanel?
     var filter: SCContentFilter?
     var isCameraReady = false
     var isPresenterON = false
@@ -115,7 +117,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
     var frameQueue = FixedLengthArray<CMTime>(maxLength: 20)
     
     @AppStorage("showOnDock")       var showOnDock: Bool = true
-    @AppStorage("showMenubar")      var showMenubar: Bool = false
+    @AppStorage("showMenubar")      var showMenubar: Bool = true
     @AppStorage("enableAEC")        var enableAEC: Bool = false
     @AppStorage("recordMic")        var recordMic: Bool = false
     @AppStorage("micDevice")        var micDevice: String = "default"
@@ -186,6 +188,94 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
         if let monitor = mouseMonitor { NSEvent.removeMonitor(monitor); mouseMonitor = nil }
     }
     
+    // MARK: - 退出保护与可见封存提示
+    private var pendingTermination = false
+
+    private func showSavingHUD() {
+        DispatchQueue.main.async {
+            let hudLabel = HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在封存录音母带，完成后自动退出…")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.primary)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+
+            let rootHUD: AnyView
+            if #available(macOS 26.0, *) {
+                rootHUD = AnyView(
+                    hudLabel
+                        .glassEffect(.regular, in: Capsule())
+                        .padding(8)
+                )
+            } else {
+                rootHUD = AnyView(
+                    hudLabel
+                        .background(
+                            Capsule()
+                                .fill(.regularMaterial)
+                                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5))
+                        )
+                )
+            }
+
+            let hosting = NSHostingView(rootView: rootHUD)
+            let size = hosting.fittingSize
+            savingHUDPanel.setContentSize(NSSize(width: max(300, size.width), height: max(48, size.height)))
+            savingHUDPanel.contentView = hosting
+            savingHUDPanel.backgroundColor = .clear
+            savingHUDPanel.isOpaque = false
+            if #available(macOS 26.0, *) {
+                savingHUDPanel.hasShadow = false
+            } else {
+                savingHUDPanel.hasShadow = true
+            }
+            savingHUDPanel.level = .statusBar
+            savingHUDPanel.hidesOnDeactivate = false
+            savingHUDPanel.sharingType = .none
+            savingHUDPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            if let screen = SCContext.getScreenWithMouse() ?? NSScreen.main {
+                let x = screen.frame.midX - savingHUDPanel.frame.width / 2
+                let y = screen.visibleFrame.maxY - savingHUDPanel.frame.height - 24
+                savingHUDPanel.setFrameOrigin(NSPoint(x: x, y: y))
+            }
+            savingHUDPanel.orderFrontRegardless()
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if pendingTermination { return .terminateNow }
+
+        let isRecording = SCContext.stream != nil || SCContext.streamType != nil
+        let exporting = SCContext.audioExportsInProgress > 0
+        if !isRecording && !exporting { return .terminateNow }
+
+        pendingTermination = true
+        showSavingHUD()
+        SCContext.showNotification(title: "正在保存录音",
+                                   body: "母带合成落盘后将自动退出，请勿强制关闭。",
+                                   id: "quickrecorder.saving.onquit")
+        if isRecording {
+            SCContext.stopRecording()
+        }
+
+        var replied = false
+        let finishQuit: () -> Void = {
+            guard !replied else { return }
+            replied = true
+            savingHUDPanel.orderOut(nil)
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        SCContext.whenAudioExportsFinished(finishQuit)
+        // 安全阀: 最多等 10 分钟, 绝不无限期卡住退出
+        DispatchQueue.main.asyncAfter(deadline: .now() + 600) {
+            finishQuit()
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ aNotification: Notification) {
         if SCContext.stream != nil { SCContext.stopRecording() }
     }
@@ -199,12 +289,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
     }
     
     func applicationWillFinishLaunching(_ notification: Notification) {
+        if ud.string(forKey: "saveDirectory") == nil,
+           let legacy = UserDefaults(suiteName: "com.lihaoyun6.QuickRecorder.fixed") {
+            let keysToMigrate = [
+                "audioFormat", "audioQuality", "background", "frameRate", "highRes",
+                "hideSelf", "highlightMouse", "hideDesktopFiles", "includeMenuBar",
+                "videoQuality", "countdown", "videoFormat", "pixelFormat", "encoder",
+                "poSafeDelay", "saveDirectory", "showMouse", "recordMic", "remuxAudio",
+                "recordWinSound", "trimAfterRecord", "showOnDock", "showMenubar",
+                "enableAEC", "recordHDR", "preventSleep", "showPreview", "savedArea",
+                "micDevice", "miniStatusBar", "neverRemindMe"
+            ]
+            for key in keysToMigrate {
+                if let val = legacy.object(forKey: key) {
+                    ud.set(val, forKey: key)
+                }
+            }
+        }
+
         scPerm = SCContext.updateAvailableContentSync() != nil
         
-        let process = NSWorkspace.shared.runningApplications.filter({ $0.bundleIdentifier == "com.lihaoyun6.QuickRecorder" })
+        let selfBundleID = Bundle.main.bundleIdentifier ?? "com.kahlilhazel.LongTake"
+        let process = NSWorkspace.shared.runningApplications.filter({ $0.bundleIdentifier == selfBundleID })
         if process.count > 1 {
             DispatchQueue.main.async {
-                let button = createAlert(title: "QuickRecorder is Running".local, message: "Please do not run multiple instances!".local, button1: "Quit".local).runModal()
+                let button = createAlert(title: "LongTake is Running".local, message: "Please do not run multiple instances!".local, button1: "Quit".local).runModal()
                 if button == .alertFirstButtonReturn { NSApp.terminate(self) }
             }
         }
@@ -235,15 +344,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
                 "recordWinSound": isMacOS12 ? false : true,
                 "trimAfterRecord": false,
                 "showOnDock": true,
-                "showMenubar": false,
+                "showMenubar": true,
                 "enableAEC": false,
                 "recordHDR": false,
                 "preventSleep": true,
                 "showPreview": isMacOS12 ? false : true,
+                "panelOpacity": 0.86,
                 "savedArea": [String: [String: CGFloat]]()
             ]
         )
         
+        // 清理旧版频繁切换 NSStatusItem.isVisible = false 导致系统控制中心写入的隐藏标记, 并为 v1.5 默认开启顶部菜单栏常驻图标
+        for pollutedKey in ["NSStatusItem VisibleCC Item-0", "NSStatusItem VisibleCC Item-1", "NSStatusItem VisibleCC Item-2",
+                            "NSStatusItem Visible Item-0", "NSStatusItem Visible Item-1", "NSStatusItem Visible Item-2"] {
+            ud.removeObject(forKey: pollutedKey)
+        }
+        if !ud.bool(forKey: "longTakeDidInitMenuBarV15") {
+            ud.set(true, forKey: "longTakeDidInitMenuBarV15")
+            ud.set(true, forKey: "showMenubar")
+        }
+
         if highRes == 0 { highRes = 2 }
         if showOnDock { NSApp.setActivationPolicy(.regular) }
         if isMacOS12 { showPreview = false; remuxAudio = false }
@@ -261,8 +381,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
             mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
         CMIOObjectSetPropertyData(CMIOObjectID(kCMIOObjectSystemObject), &prop, zero, nil, dataSize, &allow)
 
-        statusBarItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusBarItem.button?.image = NSImage()
+        StatusBarController.shared.ensureItemsInitialized()
 
         mousePointer.title = "Mouse Pointer".local
         mousePointer.level = .screenSaver
@@ -296,18 +415,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
         deviceWindow.backgroundColor = NSColor.clear
         
         controlPanel.title = "Recording Controller".local
-        controlPanel.level = .floating
-        controlPanel.titleVisibility = .hidden
+        controlPanel.level = .statusBar
+        controlPanel.isOpaque = false
+        controlPanel.hasShadow = false
+        controlPanel.hidesOnDeactivate = false
+        controlPanel.sharingType = hideSelf ? .none : .readOnly
         controlPanel.backgroundColor = NSColor.clear
         controlPanel.isReleasedWhenClosed = false
-        controlPanel.titlebarAppearsTransparent = true
         controlPanel.isMovableByWindowBackground = true
+        controlPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
         previewWindow.level = .statusBar
-        previewWindow.titlebarAppearsTransparent = true
-        previewWindow.titleVisibility = .hidden
+        previewWindow.isOpaque = false
+        previewWindow.hasShadow = true
+        previewWindow.hidesOnDeactivate = false
         previewWindow.isReleasedWhenClosed = false
         previewWindow.backgroundColor = .clear
+        previewWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
         KeyboardShortcuts.onKeyDown(for: .showPanel) {
             _ = self.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true)
@@ -348,47 +472,114 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         closeAllWindow()
         if showOnDock { _ = applicationShouldHandleReopen(NSApp, hasVisibleWindows: true) }
+        SCContext.recoverPendingRemuxesIfNeeded()
         tips("Would you like to use H.265 format for better video quality and smaller file size?",
              id: "qr.switch-to-h265.note", buttonTitle: "Use H.265", switchButton: true) {
             ud.setValue(Encoder.h265.rawValue, forKey: "encoder")
         }
     }
     
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if SCContext.stream == nil {
-            let w1 = NSApp.windows.filter({ !$0.title.contains("Item-0") && !$0.title.isEmpty && $0.isVisible })
-            let w2 = w1.filter({ !$0.title.contains(".qma") })
-            if (!w1.isEmpty && w2.isEmpty) || w1.isEmpty {
-                let offset = (!showOnDock && !showMenubar) ? 127 : 0
-                let width = isMacOS12 ? 800 : 928
-                let mainPanel = EscPanel(contentRect: NSRect(x: 0, y: 0, width: width + offset, height: 100), styleMask: [.fullSizeContentView, .nonactivatingPanel], backing: .buffered, defer: false)
-                mainPanel.contentView = NSHostingView(rootView: ContentView())
-                mainPanel.title = "QuickRecorder".local
-                mainPanel.isOpaque = false
-                mainPanel.level = .floating
-                mainPanel.isRestorable = false
-                mainPanel.backgroundColor = .clear
-                mainPanel.isReleasedWhenClosed = false
-                mainPanel.isMovableByWindowBackground = true
-                mainPanel.collectionBehavior = [.canJoinAllSpaces]
-                mainPanel.center()
-                if let screen = mainPanel.screen {
-                    let wX = (screen.frame.width - mainPanel.frame.width) / 2 + screen.frame.minX
-                    let wY = (screen.frame.height - mainPanel.frame.height) / 2 + screen.frame.minY
-                    mainPanel.setFrameOrigin(NSPoint(x: wX, y: wY))
-                }
-                mainPanel.makeKeyAndOrderFront(self)
-                if #unavailable(macOS 13) { NSApp.activate(ignoringOtherApps: true) }
-                PopoverState.shared.isShowing = false
+    func presentMainPanel(belowSettings: Bool = false, activateApp: Bool = true) {
+        guard SCContext.stream == nil && SCContext.streamType == nil else {
+            StatusBarController.shared.revealRecordingBarOnCurrentScreen()
+            return
+        }
+        PopoverState.shared.isShowing = false
+
+        let targetScreen = SCContext.getScreenWithMouse() ?? NSScreen.main
+        let hosting = NSHostingView(rootView: ContentView())
+        let fit = hosting.fittingSize
+        let panelWidth = max(880, fit.width)
+        let panelHeight = max(96, fit.height)
+
+        let panel: EscPanel
+        if let existing = mainPanelWindow {
+            panel = existing
+            panel.contentView = hosting
+            panel.setContentSize(NSSize(width: panelWidth, height: panelHeight))
+        } else {
+            panel = EscPanel(
+                contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            panel.contentView = hosting
+            panel.title = "LongTake"
+            panel.isOpaque = false
+            panel.hasShadow = false
+            // 关键根因修复: NSPanel 默认 hidesOnDeactivate = true! 未激活或双屏点击其他应用时会立刻自动隐藏(“点不开直接消失”)
+            panel.hidesOnDeactivate = false
+            panel.level = .floating
+            panel.isRestorable = false
+            panel.backgroundColor = .clear
+            panel.isReleasedWhenClosed = false
+            panel.isMovableByWindowBackground = true
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            mainPanelWindow = panel
+        }
+
+        if let screen = targetScreen {
+            let visible = screen.visibleFrame
+            let wX = visible.minX + (visible.width - panelWidth) / 2
+            let wY = belowSettings
+                ? max(visible.minY + 28, visible.midY - 310)
+                : visible.minY + (visible.height - panelHeight) / 2
+            // 若面板已在当前屏幕上且并非首次定位或设置页预览，则保留用户拖拽后的位置（安全钳制在可见区域内）
+            if !belowSettings, panel.screen == screen, panel.frame.origin != .zero,
+               visible.intersects(panel.frame) {
+                let clampedX = min(max(panel.frame.origin.x, visible.minX + 8), visible.maxX - panelWidth - 8)
+                let clampedY = min(max(panel.frame.origin.y, visible.minY + 8), visible.maxY - panelHeight - 8)
+                panel.setFrame(NSRect(x: clampedX, y: clampedY, width: panelWidth, height: panelHeight), display: true)
+            } else {
+                panel.setFrame(NSRect(x: wX, y: wY, width: panelWidth, height: panelHeight), display: true)
             }
         }
+
+        if activateApp {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        panel.orderFrontRegardless()
+        panel.makeKeyAndOrderFront(self)
+    }
+
+    func toggleMainPanel() {
+        if SCContext.stream != nil || SCContext.streamType != nil {
+            StatusBarController.shared.revealRecordingBarOnCurrentScreen()
+            return
+        }
+        if let panel = mainPanelWindow, panel.isVisible {
+            panel.orderOut(nil)
+        } else {
+            presentMainPanel(belowSettings: false, activateApp: true)
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if SCContext.stream != nil || SCContext.streamType != nil {
+            StatusBarController.shared.revealRecordingBarOnCurrentScreen()
+            return false
+        }
+        let selectorTitles: Set<String> = [
+            "Screen Selector".local,
+            "App Selector".local,
+            "Window Selector".local,
+            "Area Selector".local,
+            "Start Recording".local
+        ]
+        if let selectorWin = NSApp.windows.first(where: { $0.isVisible && selectorTitles.contains($0.title) }) {
+            NSApp.activate(ignoringOtherApps: true)
+            selectorWin.makeKeyAndOrderFront(self)
+            return false
+        }
+        presentMainPanel(belowSettings: false, activateApp: true)
         return false
     }
     
     func openSettingPanel() {
         NSApp.activate(ignoringOtherApps: true)
-        if #available(macOS 14, *) {
-            NSApp.mainMenu?.items.first?.submenu?.item(at: 3)?.performAction()
+        if let settingsItem = NSApp.mainMenu?.items.first?.submenu?.items.first(where: { $0.keyEquivalent == "," }) {
+            settingsItem.performAction()
         } else if #available(macOS 13, *) {
             NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
         } else {
@@ -398,7 +589,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
     
     class EscPanel: NSPanel {
         override func cancelOperation(_ sender: Any?) {
-            self.close()
+            self.orderOut(nil)
         }
         override var canBecomeKey: Bool {
             return true
@@ -407,16 +598,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
 }
 
 func closeMainWindow() {
-    for w in NSApp.windows.filter({ $0.title == "QuickRecorder".local }) {
-        w.close()
+    PopoverState.shared.isShowing = false
+    AppDelegate.shared.mainPanelWindow?.orderOut(nil)
+    for w in NSApp.windows.filter({ $0.title == "LongTake" || $0.title == "QuickRecorder".local }) {
+        w.orderOut(nil)
     }
 }
 
 func closeAllWindow(except: String = "") {
+    AppDelegate.shared.mainPanelWindow?.orderOut(nil)
     for w in NSApp.windows.filter({
         $0.title != "Item-0" && $0.title != ""
+        && $0.title != "Recording Controller".local
         && !$0.title.lowercased().contains(".qma")
-        && !$0.title.contains(except) }) { w.close() }
+        && !$0.title.contains(except) }) {
+        if w === AppDelegate.shared.mainPanelWindow || w === controlPanel || w === previewWindow || w === savingHUDPanel {
+            w.orderOut(nil)
+        } else {
+            w.close()
+        }
+    }
 }
 
 func findNSSplitVIew(view: NSView?) -> NSSplitView? {
@@ -548,7 +749,8 @@ extension NSMenuItem {
 
 extension NSImage {
     static func createScreenShot() -> NSImage? {
-        let excludedAppBundleIDs = ["com.lihaoyun6.QuickRecorder"]
+        var excludedAppBundleIDs = ["com.lihaoyun6.QuickRecorder"]
+        if let bid = Bundle.main.bundleIdentifier { excludedAppBundleIDs.append(bid) }
         var exclusionPIDs = [Int]()
         for app in NSWorkspace.shared.runningApplications {
             if excludedAppBundleIDs.contains(app.bundleIdentifier ?? "") {

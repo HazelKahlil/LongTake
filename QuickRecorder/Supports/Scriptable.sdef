@@ -36,6 +36,10 @@
                 <cocoa key="mic"/>
             </parameter>
         </command>
+
+        <command name="stop recording" code="QKrdStop" description="Stop active recording">
+            <cocoa class="QuickRecorder.stopRecordingCommand"/>
+        </command>
         
         <command name="configure" code="QKrdSEtt" description="Modify recording settings">
             <cocoa class="QuickRecorder.setPreferences"/>

@@ -211,6 +211,11 @@
 "Would you like to use H.265 format for better video quality and smaller file size?" = "是否使用 H.265 編碼以獲得更好的錄影畫質和更小的檔案體積?";
 "QuickRecorder needs this permission to record your camera or mobile device." = "QuickRecorder 需要此權限以錄製來自攝像頭或行動裝置的畫面.";
 "Select Window Directly" = "直接點選視窗";
+"Appearance" = "介面外觀";
+"Panel Background Opacity" = "主面板背景濃度（可讀性）";
+"Preview Main Panel" = "即時預覽主面板效果";
+"Reset" = "恢復預設";
+"Drag to move panel" = "按住拖動面板";
 
 // Please don't translate the following warning strings, it will make it difficult for me to read the logs
 "failed to fetch file for size indicator: %@" = "获取文件大小失败: ";

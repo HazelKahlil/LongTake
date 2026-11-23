@@ -367,6 +367,12 @@ struct qmaPackageHandle: FileDocument {
 }
 
 extension qmaPackageHandle {
+    static func loadInfo(from url: URL) throws -> Info {
+        let infoURL = url.appendingPathComponent("info.json")
+        let infoData = try Data(contentsOf: infoURL)
+        return try JSONDecoder().decode(Info.self, from: infoData)
+    }
+
     static func load(from url: URL) throws -> qmaPackageHandle {
         let fileWrapper = try FileWrapper(url: url, options: .immediate)
         guard let infoFileWrapper = fileWrapper.fileWrappers?["info.json"],
@@ -421,9 +427,13 @@ class AudioPlayerManager: ObservableObject {
     private var packageURL: URL?
     private var seekTime: Double = 0
     private var panel = NSSavePanel()
+    private let offlineExportOnly: Bool
     
-    init() {
-        setupAudioEngine()
+    init(forOfflineExportOnly: Bool = false) {
+        self.offlineExportOnly = forOfflineExportOnly
+        if !forOfflineExportOnly {
+            setupAudioEngine()
+        }
     }
     
     private func setupAudioEngine() {
@@ -558,78 +568,176 @@ class AudioPlayerManager: ObservableObject {
         }
     }
     
-    func saveFile(_ url: URL, saveAsMP3: Bool = false) {
-        var url = url
-        if url.pathExtension == "mp3" { url = url.deletingPathExtension() }
-        if url.pathExtension != self.fileFormat { url = url.appendingPathExtension(self.fileFormat) }
-        let lastComp = url.lastPathComponent
-        if self.exportMP3 { url = url.deletingLastPathComponent().appendingPathComponent("." + url.lastPathComponent) }
-        
+    func saveFile(_ url: URL, saveAsMP3: Bool = false, sourceQMAPath: String? = nil, isRecovery: Bool = false) {
+        var baseTargetURL = url
+        if baseTargetURL.pathExtension.lowercased() == "mp3" {
+            baseTargetURL = baseTargetURL.deletingPathExtension()
+        }
+        if baseTargetURL.pathExtension.lowercased() != self.fileFormat.lowercased() {
+            baseTargetURL = baseTargetURL.appendingPathExtension(self.fileFormat)
+        }
+        let finalM4AURL = baseTargetURL
+        let finalMP3URL = baseTargetURL.deletingPathExtension().appendingPathExtension("mp3")
+        let finalDestinationURL = saveAsMP3 ? finalMP3URL : finalM4AURL
+
+        let sysURLSnapshot = self.packageURL?.appendingPathComponent("sys.\(self.fileFormat)") ?? self.audioFile1?.url
+        let micURLSnapshot = self.packageURL?.appendingPathComponent("mic.\(self.fileFormat)") ?? self.audioFile2?.url
+        let sysVolSnapshot = self.sysVol
+        let micVolSnapshot = self.micVol
+        let encoderSnapshot = self.fileEncoder
+        let formatExtSnapshot = self.fileFormat
+
+        // 同步登记, 保证 stopRecording() 返回时退出流程一定能看到整个导出链路 (含 MP3 二阶段转码)
+        SCContext.beginAudioExport()
         Thread.detachNewThread {
+            defer {
+                SCContext.endAudioExport()
+                DispatchQueue.main.async { self.exporting = false }
+            }
             DispatchQueue.main.async { self.exporting = true }
+
+            let targetDir = finalDestinationURL.deletingLastPathComponent()
+            let token = UUID().uuidString
+            let stagingAudioURL = targetDir.appendingPathComponent(".longtake-staging-\(token).\(formatExtSnapshot)")
+            let stagingMP3URL = targetDir.appendingPathComponent(".longtake-staging-\(token).mp3")
+            defer {
+                try? fd.removeItem(at: stagingAudioURL)
+                try? fd.removeItem(at: stagingMP3URL)
+            }
+
             do {
-                guard let audioFile1 = self.audioFile1, let audioFile2 = self.audioFile2 else { return }
-                self.playerNode1.scheduleFile(audioFile1, at: nil, completionHandler: nil)
-                self.playerNode2.scheduleFile(audioFile2, at: nil, completionHandler: nil)
-                
-                let audioSettings = SCContext.updateAudioSettings(format: self.fileEncoder)
-                let outputFormat = self.playerNode1.outputFormat(forBus: 0)
-                let outputFile = try AVAudioFile(forWriting: url, settings: audioSettings, commonFormat: .pcmFormatFloat32, interleaved: false)
-                self.engine.stop()
-                try self.engine.enableManualRenderingMode(.offline, format: outputFormat, maximumFrameCount: 4096)
-                try self.engine.start()
-                
-                self.playerNode1.play()
-                self.playerNode2.play()
-                
-                let duration = audioFile1.length
-                let buffer = AVAudioPCMBuffer(pcmFormat: self.engine.manualRenderingFormat, frameCapacity: self.engine.manualRenderingMaximumFrameCount)!
-                
-                while self.engine.manualRenderingSampleTime < duration {
-                    let framesToRender = min(UInt32(buffer.frameCapacity), UInt32(duration - self.engine.manualRenderingSampleTime))
-                    let status = try self.engine.renderOffline(framesToRender, to: buffer)
-                    switch status {
-                    case .success:
-                        try outputFile.write(from: buffer)
-                    case .insufficientDataFromInputNode, .cannotDoInCurrentContext:
-                        // Handle the cases where rendering cannot proceed
-                        break
-                    default:
-                        // Handle other cases if needed
-                        break
-                    }
+                guard let sysURL = sysURLSnapshot, let micURL = micURLSnapshot else {
+                    throw NSError(domain: "LongTakeExportError", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing source audio track paths."])
                 }
-                
-                self.engine.disableManualRenderingMode()
-                self.engine.stop()
-                self.setupAudioEngine()
-                
-                let title = "Recording Completed".local
-                var body = String(format: "File saved to: %@".local, url.path.removingPercentEncoding!)
-                let id = "quickrecorder.completed.\(UUID().uuidString)"
-                
-                if saveAsMP3 {
-                    let oldURL = url
-                    let newURl = url.deletingLastPathComponent().appendingPathComponent(lastComp).deletingPathExtension().appendingPathExtension("mp3")
-                    body = String(format: "File saved to: %@".local, newURl.path.removingPercentEncoding!)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                        Task {
-                            do {
-                                try await SCContext.m4a2mp3(inputUrl: oldURL, outputUrl: newURl)
-                                try? fd.removeItem(at: oldURL)
-                            } catch {
-                                SCContext.showNotification(title: "Failed to save file".local, body: "\(error.localizedDescription)", id: "quickrecorder.error.\(UUID().uuidString)")
-                                return
+                let sysFile = try AVAudioFile(forReading: sysURL)
+                let micFile = try AVAudioFile(forReading: micURL)
+
+                let renderSampleRate: Double = 48000.0
+                guard let renderFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: renderSampleRate, channels: 2, interleaved: false) else {
+                    throw NSError(domain: "LongTakeExportError", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unable to create offline render format."])
+                }
+
+                // 使用完全独立的离线 AVAudioEngine, 不触碰系统物理音频输出设备, 杜绝耳机插拔或设备切换导致死循环
+                let offlineEngine = AVAudioEngine()
+                let nodeSys = AVAudioPlayerNode()
+                let nodeMic = AVAudioPlayerNode()
+                let mixer = AVAudioMixerNode()
+                offlineEngine.attach(nodeSys)
+                offlineEngine.attach(nodeMic)
+                offlineEngine.attach(mixer)
+
+                offlineEngine.connect(nodeSys, to: mixer, format: sysFile.processingFormat)
+                offlineEngine.connect(nodeMic, to: mixer, format: micFile.processingFormat)
+                offlineEngine.connect(mixer, to: offlineEngine.mainMixerNode, format: renderFormat)
+
+                nodeSys.volume = sysVolSnapshot
+                nodeMic.volume = micVolSnapshot
+
+                let maxFrames: AVAudioFrameCount = 4096
+                try offlineEngine.enableManualRenderingMode(.offline, format: renderFormat, maximumFrameCount: maxFrames)
+                try offlineEngine.start()
+
+                if sysFile.length > 0 {
+                    nodeSys.scheduleFile(sysFile, at: nil, completionHandler: nil)
+                }
+                if micFile.length > 0 {
+                    nodeMic.scheduleFile(micFile, at: nil, completionHandler: nil)
+                }
+                nodeSys.play()
+                nodeMic.play()
+
+                let sysFramesAt48k = AVAudioFramePosition((Double(sysFile.length) * renderSampleRate / max(1.0, sysFile.processingFormat.sampleRate)).rounded(.up))
+                let micFramesAt48k = AVAudioFramePosition((Double(micFile.length) * renderSampleRate / max(1.0, micFile.processingFormat.sampleRate)).rounded(.up))
+                let totalFrames = max(AVAudioFramePosition(1024), max(sysFramesAt48k, micFramesAt48k))
+
+                let audioSettings = SCContext.updateAudioSettings(format: encoderSnapshot, rate: Int(renderSampleRate))
+
+                // 内部作用域确保 outputFile 在原子替换前彻底释放并完成 moov 索引写入
+                do {
+                    let outputFile = try AVAudioFile(forWriting: stagingAudioURL, settings: audioSettings, commonFormat: .pcmFormatFloat32, interleaved: false)
+                    guard let buffer = AVAudioPCMBuffer(pcmFormat: offlineEngine.manualRenderingFormat, frameCapacity: offlineEngine.manualRenderingMaximumFrameCount) else {
+                        throw NSError(domain: "LongTakeExportError", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to allocate offline PCM buffer."])
+                    }
+
+                    var stalledCount = 0
+                    while offlineEngine.manualRenderingSampleTime < totalFrames {
+                        let remaining = totalFrames - offlineEngine.manualRenderingSampleTime
+                        let framesToRender = min(UInt32(buffer.frameCapacity), UInt32(remaining))
+                        let status = try offlineEngine.renderOffline(framesToRender, to: buffer)
+                        switch status {
+                        case .success:
+                            stalledCount = 0
+                            try outputFile.write(from: buffer)
+                        case .insufficientDataFromInputNode, .cannotDoInCurrentContext:
+                            stalledCount += 1
+                            if stalledCount > 120 {
+                                throw NSError(domain: "LongTakeExportError", code: 4, userInfo: [NSLocalizedDescriptionKey: "Offline audio rendering stalled."])
                             }
+                            Thread.sleep(forTimeInterval: 0.005)
+                        case .error:
+                            throw NSError(domain: "LongTakeExportError", code: 5, userInfo: [NSLocalizedDescriptionKey: "Offline audio engine returned an error."])
+                        @unknown default:
+                            throw NSError(domain: "LongTakeExportError", code: 6, userInfo: [NSLocalizedDescriptionKey: "Unknown offline audio render status."])
                         }
                     }
                 }
-                
-                SCContext.showNotification(title: title, body: body, id: id)
+
+                offlineEngine.stop()
+                offlineEngine.disableManualRenderingMode()
+
+                // 校验临时文件完整性: 绝不允许 28 字节残缺头进入目标目录
+                let stagedSize = (try? fd.attributesOfItem(atPath: stagingAudioURL.path)[.size] as? Int64) ?? 0
+                let verifyFile = try? AVAudioFile(forReading: stagingAudioURL)
+                guard stagedSize > 64, let verified = verifyFile, verified.length > 0 else {
+                    throw NSError(domain: "LongTakeExportError", code: 7, userInfo: [NSLocalizedDescriptionKey: "Rendered audio verification failed (size: \(stagedSize)B)."])
+                }
+
+                if saveAsMP3 {
+                    let mp3Done = DispatchSemaphore(value: 0)
+                    var mp3Error: Error?
+                    Task.detached(priority: .userInitiated) {
+                        do {
+                            try await SCContext.m4a2mp3(inputUrl: stagingAudioURL, outputUrl: stagingMP3URL)
+                        } catch {
+                            mp3Error = error
+                        }
+                        mp3Done.signal()
+                    }
+                    mp3Done.wait()
+                    if let err = mp3Error { throw err }
+                    let mp3Size = (try? fd.attributesOfItem(atPath: stagingMP3URL.path)[.size] as? Int64) ?? 0
+                    guard mp3Size > 128 else {
+                        throw NSError(domain: "LongTakeExportError", code: 8, userInfo: [NSLocalizedDescriptionKey: "Encoded MP3 verification failed."])
+                    }
+                    if fd.fileExists(atPath: finalMP3URL.path) {
+                        _ = try fd.replaceItemAt(finalMP3URL, withItemAt: stagingMP3URL)
+                    } else {
+                        try fd.moveItem(at: stagingMP3URL, to: finalMP3URL)
+                    }
+                } else {
+                    if fd.fileExists(atPath: finalM4AURL.path) {
+                        _ = try fd.replaceItemAt(finalM4AURL, withItemAt: stagingAudioURL)
+                    } else {
+                        try fd.moveItem(at: stagingAudioURL, to: finalM4AURL)
+                    }
+                }
+
+                if let qmaPath = sourceQMAPath {
+                    SCContext.clearPendingRemux(qmaPath: qmaPath)
+                }
+
+                if !isRecovery && ud.bool(forKey: "showPreview") {
+                    let finalPath = finalDestinationURL.path
+                    DispatchQueue.main.async {
+                        SCContext.showPreview(path: finalPath, image: NSImage(named: "audioIcon"))
+                    }
+                }
+                let title = isRecovery ? "已自动恢复未完成的录音" : "Recording Completed".local
+                let body = String(format: "File saved to: %@".local, finalDestinationURL.path.removingPercentEncoding ?? finalDestinationURL.path)
+                SCContext.showNotification(title: title, body: body, id: "quickrecorder.completed.\(UUID().uuidString)")
             } catch {
                 SCContext.showNotification(title: "Failed to save file".local, body: "\(error.localizedDescription)", id: "quickrecorder.error.\(UUID().uuidString)")
             }
-            DispatchQueue.main.async { self.exporting = false }
         }
     }
     

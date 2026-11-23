@@ -43,12 +43,37 @@ struct GeneralView: View {
     @AppStorage("countdown") private var countdown: Int = 0
     @AppStorage("poSafeDelay") private var poSafeDelay: Int = 1
     @AppStorage("showOnDock") private var showOnDock: Bool = true
-    @AppStorage("showMenubar") private var showMenubar: Bool = false
+    @AppStorage("showMenubar") private var showMenubar: Bool = true
+    @AppStorage("panelOpacity") private var panelOpacity: Double = 0.86
     
     @State private var launchAtLogin = false
 
     var body: some View {
-        SForm {
+        SForm(spacing: 20) {
+            SGroupBox(label: "Appearance") {
+                HStack(spacing: 8) {
+                    Text("Panel Background Opacity")
+                    Spacer()
+                    if abs(panelOpacity - 0.86) > 0.015 {
+                        Button("Reset") {
+                            panelOpacity = 0.86
+                        }
+                        .controlSize(.small)
+                    }
+                    Slider(value: $panelOpacity, in: 0.25...0.98)
+                        .controlSize(.small)
+                        .frame(width: 150)
+                    Text("\(Int((panelOpacity * 100).rounded()))%")
+                        .font(.system(size: 12, weight: .medium).monospacedDigit())
+                        .foregroundColor(.secondary)
+                        .frame(width: 38, alignment: .trailing)
+                }
+                .frame(height: 20)
+                SDivider()
+                SButton("Preview Main Panel", buttonTitle: "Open Main Panel") {
+                    AppDelegate.shared.presentMainPanel(belowSettings: true)
+                }
+            }
             SGroupBox(label: "Startup") {
                 if #available(macOS 13, *) {
                     SToggle("Launch at Login", isOn: $launchAtLogin)
@@ -71,15 +96,17 @@ struct GeneralView: View {
                 SToggle("Show QuickRecorder on Menu Bar", isOn: $showMenubar)
                     //.disabled(!showOnDock)
             }
-            SGroupBox(label: "Update") { UpdaterSettingsView(updater: updaterController.updater) }
-            VStack(spacing: 8) {
-                CheckForUpdatesView(updater: updaterController.updater)
+            VStack(spacing: 6) {
                 if let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
-                    Text("QuickRecorder v\(appVersion)")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                    Text("LongTake v\(appVersion)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundColor(.primary)
                 }
+                Text("本地母带定制版 · 已锁定上游自动更新")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
+            .padding(.top, 8)
         }
         .onAppear{ if #available(macOS 13, *) { launchAtLogin = (SMAppService.mainApp.status == .enabled) }}
         .onChange(of: showMenubar) { _ in updateStatusBar() }
@@ -151,7 +178,10 @@ struct RecorderView: View {
                 SDivider()
                 SToggle("Exclude Files on Desktop", isOn: $hideDesktopFiles, tips: "If enabled, all files on the Desktop will be hidden from the video when recording.")
             }
-        }.onAppear{ userColor = ud.color(forKey: "userColor") ?? Color.black }
+        }
+        .onAppear{ userColor = ud.color(forKey: "userColor") ?? Color.black }
+        .onChange(of: miniStatusBar) { _ in updateStatusBar() }
+        .onChange(of: hideSelf) { newValue in controlPanel.sharingType = newValue ? .none : .readOnly }
     }
 }
 

@@ -1,59 +1,84 @@
-#
 <p align="center">
-<img src="./QuickRecorder/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png" width="200" height="200" />
-<h1 align="center">QuickRecorder</h1>
-<h3 align="center">A lightweight and high-performance screen recorder for macOS<br><a href="./README_zh.md">[中文版本]</a><br><a href="https://lihaoyun6.github.io/quickrecorder/">[Landing Page]</a>
+  <img src="./QuickRecorder/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png" width="160" height="160" alt="LongTake Icon" />
+</p>
+<h1 align="center">LongTake</h1>
+<p align="center">
+  A crash-resilient, high-contrast Liquid Glass macOS screen &amp; dual-track audio recorder.<br/>
+  Forked from <a href="https://github.com/lihaoyun6/QuickRecorder">QuickRecorder</a> under GNU AGPLv3.<br/>
+  <a href="./README_zh.md">[简体中文]</a> · <a href="./docs/ARCHITECTURE.md">[Architecture &amp; Root-Cause Notes]</a>
 </p>
 
-## Screenshot
-<p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./img/preview_en_dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="./img/preview_en.png">
-  <img alt="QuickRecorder Screenshots" src="./img/preview_en.png" width="840"/>
-</picture>
-</p>
+---
 
-## Installation and Usage
-### System Requirements:
-- macOS 12.3 and Later
+## Why LongTake?
 
-### Install:
-Download the latest installation file [here](../../releases/latest) or install via Homebrew:
+**LongTake** started from real-world failures recording long meetings and screen sessions on macOS (such as losing hours of system + microphone audio into a corrupt 28-byte `.m4a` header on quit or audio device changes). Every fix was engineered from first principles rather than surface patches.
+
+### Core Reliability Fixes (Dual-Track Audio & Crash Resilience)
+- **Synchronized Mic `AVAssetWriter` Finalization**: Waits deterministically (`DispatchGroup`) for `mic.m4a` `moov` atom completion before mixing `.qma` packages, plus 5-second `movieFragmentInterval` checkpoints and thread-safe serial system audio writing.
+- **Isolated Offline `AVAudioEngine` Rendering**: Mixes `.qma` tracks through an isolated manual-rendering engine decoupled from physical audio hardware — switching headphones or Bluetooth devices mid-export will never hang CPU at 100%. Duration uses `max(sysFrames, micFrames)` normalized to 48 kHz.
+- **Write-Ahead Atomic Staging + Crash Self-Healing**: Writes mixed outputs to `.longtake-staging-<UUID>.m4a`, validates non-zero readable frames, and atomically replaces the target path. Tracks all 4 async export pipelines with `.terminateLater` quit protection HUD and crash-only pending remux recovery.
+- **Pause/Resume PTS & Timer Sync**: Deducts cumulative pause intervals across both system audio and microphone streams so long paused sessions stay lip-synced.
+- **No Infinite Permission Retry Loops**: Checks `CGPreflightScreenCaptureAccess()` silently at startup instead of looping every second on `SCShareableContent`.
+
+### Native macOS 26/27 Liquid Glass UI & Ergonomics
+- **High-Contrast Single-Row Control Bar**: Unified horizontal bar placing the **Microphone toggle + native input device `Picker`** first, followed by 6 equal-height capture actions, `Preferences`, and `Close`.
+- **User-Tunable Readability**: Adaptive paper/slate backing inside `GlassEffectContainer` + `.glassEffect(.regular)` (macOS 26+) with a live **Panel Background Opacity (25%–98%)** slider in Preferences.
+- **Immediate AppKit Drag Grip**: Custom `WindowDragHandle` (`acceptsFirstMouse -> true`) lets you drag the floating bar on the very first press without activating it first.
+- **Dual-Channel Recording Controller**:
+  - **Borderless Top Floating Pill** (`FloatingHUDPanel`, `sharingType = .none` so it stays invisible in recordings) with fixed-width slots (`录制中`/`已暂停`, `暂停`/`继续`, `停止`) and collapse-to-menubar support.
+  - **Single Native `NSMenu` Status Item**: Left-click toggles the main bar when idle and opens a safe native control menu while recording (eliminating accidental one-click stops).
+- **Multi-Monitor Reopen Fixed**: Explicit `hidesOnDeactivate = false` and mouse-screen-aware reopening so clicking the Dock or Menu Bar icon reliably brings the panel back.
+
+---
+
+## Icon & Design Assets
+
+LongTake ships a custom 2048px continuous-squircle icon (`Braun Offset Reel`). Four native SwiftUI candidates live in [`./design/`](./design) with an interactive preview ([`icon-playground.html`](./design/icon-playground.html)) and generator script ([`scripts/render_icons.swift`](./scripts/render_icons.swift)):
 
 ```bash
-brew install lihaoyun6/tap/quickrecorder
+swift scripts/render_icons.swift --install 1   # choose variant 1..4
 ```
 
-### Features/Usage:
-- You can use QuickRecorder to record your screens / windows / applications / mobile devices... etc.
+<p align="center">
+  <img src="./design/candidates-v2-sheet.png" width="840" alt="LongTake Icon Candidates" />
+</p>
 
-- QuickRecorder supports driver-free audio loopback recording, mouse highlighting, screen magnifier and many more useful features.  
-- The new **"[Presenter Overlay](https://support.apple.com/guide/facetime/presenter-overlay-video-conferencing-fctm6333f4bd/mac)"** in macOS 14 was fully supported by QuickRecorder, which can overlay the camera in real time on your recording *(macOS 12/13 can only use camera floating window)*  
-- QuickRecorder is able to record `HEVC with Alpha` video format, that can contain alpha channel in the output file *(currently only iMovie and FCPX support this feature)*  
+---
 
-## Q&A
-**1. Where can I reopen the main panel after closing it?**
-> Click the Dock tile or Menubar icon of QuickRecorder to reopen the main panel at any time.
+## Build from Source
 
-**2. Why does QuickRecorder not a sandbox app?**
-> QuickRecorder has no plans to be uploaded to the App Store, so it does not need to be designed as a sandbox app.  
+### Requirements
+- macOS 12.3+ (Liquid Glass effects automatically activate on macOS 26+)
+- Xcode (tested with Xcode 26.4 / MacOSX26.4.sdk)
 
-**3. How to independently control the volume of system sound and sound from microphone in other video editor?**
-> QuickRecorder will merge the audio input from the microphone to the main audio track after recording by default. If you need to edit the video, you can turn off the `Record Microphone to Main Track` option in the settings panel. After turning off, the system sound and sound from microphone will be recorded into two audio tracks and can be edited independently.  
+### Quick Build & Install
+> **Note**: Keep `PRODUCT_NAME = QuickRecorder` during `xcodebuild` so SwiftPM's `KeyboardShortcuts_KeyboardShortcuts.bundle` resource bundle resolves properly; set `CFBundleName` / `CFBundleDisplayName` to `LongTake` in `Info.plist` (already configured).
 
-## Donate
-<img src="./img/donate.png" width="350"/>
+```bash
+git clone https://github.com/HazelKahlil/LongTake.git
+cd LongTake
 
-## Thanks
-[Azayaka](https://github.com/Mnpn/Azayaka) @Mnpn
-> The source of inspiration and part of the code of the screen recording engine comes from the Azayaka project, and I am also one of the code contributors to this project
+xcodebuild -project QuickRecorder.xcodeproj -scheme QuickRecorder \
+  -configuration Release -derivedDataPath build \
+  CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build
 
-[KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts) @sindresorhus  
-> QuickRecorder uses this swift library to handle shortcut key events  
+# Optional: run offline audio pipeline self-check
+swift scripts/verify-audio-pipeline.swift
+```
 
-[SwiftLAME](https://github.com/hidden-spectrum/SwiftLAME) @Hidden Spectrum
-> QuickRecorder uses this swift library to handle MP3 output
+To preserve macOS TCC Screen Recording & Microphone permissions across rebuilds on your own Mac, sign inside-out (`Sparkle.framework` helpers -> `Sparkle.framework` -> `KeyboardShortcuts` bundle -> `.app` with `QuickRecorder/QuickRecorder.entitlements`, without `--options runtime` for local dev certs) using your own `Apple Development` certificate in Keychain.
 
-[ChatGPT](https://chat.openai.com) @OpenAI
-> Note: Part of the code in this project was generated or refactored using ChatGPT.
+---
+
+## License & Upstream Attribution
+
+Modified by **HazelKahlil** in 2026 based on [lihaoyun6/QuickRecorder](https://github.com/lihaoyun6/QuickRecorder) (`e820517`).
+
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)** — see [`LICENSE`](./LICENSE) for full terms.
+
+Thanks to upstream & open-source dependencies:
+- [QuickRecorder](https://github.com/lihaoyun6/QuickRecorder) (@lihaoyun6)
+- [Azayaka](https://github.com/Mnpn/Azayaka) (@Mnpn)
+- [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts) (@sindresorhus)
+- [SwiftLAME](https://github.com/hidden-spectrum/SwiftLAME) (@Hidden Spectrum)

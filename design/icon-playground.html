@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LongTake · 图标审美方向预览台 (Playground)</title>
+<style>
+  :root {
+    --bg: #F6F3EC;
+    --surface: #EFEBE1;
+    --ink: #1D1C1A;
+    --muted: #6E6A63;
+    --hairline: rgba(29, 28, 26, 0.10);
+    --accent: #C7452D;
+    --dock-bg: rgba(255, 255, 255, 0.52);
+    --dock-border: rgba(255, 255, 255, 0.65);
+  }
+  [data-theme="dark"] {
+    --bg: #161618;
+    --surface: #202023;
+    --ink: #ECE8DF;
+    --muted: #98948C;
+    --hairline: rgba(255, 255, 255, 0.10);
+    --accent: #D94B34;
+    --dock-bg: rgba(38, 38, 42, 0.62);
+    --dock-border: rgba(255, 255, 255, 0.12);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    padding: 40px 48px 72px;
+    line-height: 1.55;
+  }
+  header {
+    max-width: 1120px;
+    margin: 0 auto 36px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    border-bottom: 1px solid var(--hairline);
+    padding-bottom: 20px;
+  }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .controls { display: flex; gap: 8px; }
+  button {
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--hairline);
+    background: var(--surface);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  button.active {
+    background: var(--ink);
+    color: var(--bg);
+    border-color: var(--ink);
+  }
+  .grid {
+    max-width: 1120px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 20px;
+  }
+  .card {
+    padding: 24px 20px;
+    border-radius: 14px;
+    background: var(--surface);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: left;
+  }
+  .card.selected {
+    outline: 1.5px solid var(--accent);
+    outline-offset: -1.5px;
+  }
+  .card img.hero {
+    width: 176px;
+    height: 176px;
+    display: block;
+    margin-bottom: 16px;
+  }
+  .meta { width: 100%; }
+  .tag {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--accent);
+    margin-bottom: 4px;
+  }
+  .title { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+  .desc { font-size: 12.5px; color: var(--muted); }
+  .ladder-section {
+    max-width: 1120px;
+    margin: 36px auto 0;
+    padding: 28px 32px;
+    border-radius: 16px;
+    background: var(--surface);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 32px;
+    flex-wrap: wrap;
+  }
+  .ladder {
+    display: flex;
+    align-items: flex-end;
+    gap: 24px;
+  }
+  .ladder-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .dock-preview {
+    padding: 10px 16px;
+    border-radius: 20px;
+    background: var(--dock-bg);
+    border: 1px solid var(--dock-border);
+    backdrop-filter: blur(20px);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .dock-neighbor {
+    width: 54px;
+    height: 54px;
+    border-radius: 13px;
+    background: rgba(128, 128, 128, 0.22);
+  }
+  .dock-preview img { width: 64px; height: 64px; }
+  .cmd-box {
+    max-width: 1120px;
+    margin: 20px auto 0;
+    padding: 14px 18px;
+    border-radius: 10px;
+    background: var(--surface);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  code { color: var(--ink); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>LongTake · 图标与视觉母题预览台</h1>
+    <div class="sub">原生 SwiftUI Continuous Squircle 矢量超采样渲染 · 零锯齿与零外白圈 · 点击卡片切换尺寸阶梯与程序坞预览</div>
+  </div>
+  <div class="controls">
+    <button id="btn-light" class="active" onclick="setTheme('light')">暖纸浅色</button>
+    <button id="btn-dark" onclick="setTheme('dark')">暗房深色</button>
+  </div>
+</header>
+
+<section class="grid">
+  <div class="card selected" onclick="selectOption(1, this)">
+    <img class="hero" src="v2-option-1.png" alt="Option 1">
+    <div class="meta">
+      <div class="tag">OPTION 01 · 当前已实装</div>
+      <div class="title">母带走带 · Braun Offset Reel</div>
+      <div class="desc">致敬博朗 TP 1 与 Nagra 开盘机。不对称偏心供带轮绷紧走带绕过导轮，右下角静置一枚朱砂信号点，杜绝对称双轮的「人脸错觉」。</div>
+    </div>
+  </div>
+
+  <div class="card" onclick="selectOption(2, this)">
+    <img class="hero" src="v2-option-2.png" alt="Option 2">
+    <div class="meta">
+      <div class="tag">OPTION 02 · 影像暗房</div>
+      <div class="title">暗房取景 · Obsidian Gate</div>
+      <div class="desc">35mm 电影胶片片门取景框包络一枚饱满朱砂录音核，底置五道微米级时间标尺，契合深色专业剪辑与编码桌面。</div>
+    </div>
+  </div>
+
+  <div class="card" onclick="selectOption(3, this)">
+    <img class="hero" src="v2-option-3.png" alt="Option 3">
+    <div class="meta">
+      <div class="tag">OPTION 03 · 纸墨版画</div>
+      <div class="title">一镜声轨 · Editorial Track</div>
+      <div class="desc">承袭 Mono-color 档案纸墨语言：五道垂直胶片光学声轨柱配右侧朱砂定音圆印，80% 炭墨与 20% 朱砂张力平衡。</div>
+    </div>
+  </div>
+
+  <div class="card" onclick="selectOption(4, this)">
+    <img class="hero" src="v2-option-4.png" alt="Option 4">
+    <div class="meta">
+      <div class="tag">OPTION 04 · 随身机械</div>
+      <div class="title">定音刻盘 · Field Platter</div>
+      <div class="desc">借鉴 TP-7 随身母带机指尖惯性转盘：拉丝暖铝底盘嵌消光黑转盘，42° 指针直指外圈朱砂录音点，16px 下依然锐利。</div>
+    </div>
+  </div>
+</section>
+
+<section class="ladder-section">
+  <div class="ladder">
+    <div class="ladder-item"><img id="s-128" src="v2-option-1.png" width="128" height="128"><span>128px</span></div>
+    <div class="ladder-item"><img id="s-64" src="v2-option-1.png" width="64" height="64"><span>64px</span></div>
+    <div class="ladder-item"><img id="s-32" src="v2-option-1.png" width="32" height="32"><span>32px</span></div>
+    <div class="ladder-item"><img id="s-16" src="v2-option-1.png" width="16" height="16"><span>16px</span></div>
+  </div>
+
+  <div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">macOS 程序坞邻近比例模拟</div>
+    <div class="dock-preview">
+      <div class="dock-neighbor"></div>
+      <div class="dock-neighbor"></div>
+      <img id="s-dock" src="v2-option-1.png" alt="Dock Icon">
+      <div class="dock-neighbor"></div>
+    </div>
+  </div>
+</section>
+
+<div class="cmd-box">
+  <span>一键切换实装指令：</span>
+  <code id="cmd-text">swift scripts/render_icons.swift --install 1</code>
+</div>
+
+<script>
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+    document.getElementById('btn-light').classList.toggle('active', t === 'light');
+    document.getElementById('btn-dark').classList.toggle('active', t === 'dark');
+  }
+  function selectOption(n, el) {
+    document.querySelectorAll('.card').forEach(c => c.classList.remove('selected'));
+    el.classList.add('selected');
+    const src = `v2-option-${n}.png`;
+    ['s-128', 's-64', 's-32', 's-16', 's-dock'].forEach(id => document.getElementById(id).src = src);
+    document.getElementById('cmd-text').textContent = `swift scripts/render_icons.swift --install ${n}`;
+  }
+</script>
+</body>
+</html>
