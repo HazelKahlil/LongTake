@@ -386,7 +386,7 @@ func main() throws {
     let appIconSetDir = repoRoot.appendingPathComponent("QuickRecorder/Assets.xcassets/AppIcon.appiconset")
     try FileManager.default.createDirectory(at: designDir, withIntermediateDirectories: true)
 
-    var installVariant = 1
+    var installVariant: Int? = nil
     let args = CommandLine.arguments
     if let idx = args.firstIndex(of: "--install"), idx + 1 < args.count, let v = Int(args[idx + 1]), (1...4).contains(v) {
         installVariant = v
@@ -402,7 +402,12 @@ func main() throws {
 
     try buildSheet(designDir: designDir, reps: master1024)
 
-    let chosenHiRes = renderSwiftUIIcon(installVariant, pixelSize: 2048)
+    guard let variant = installVariant else {
+        print("Rendered 4 native SwiftUI icon candidates to design/. Pass --install <1..4> to update AppIcon.appiconset.")
+        return
+    }
+
+    let chosenHiRes = renderSwiftUIIcon(variant, pixelSize: 2048)
     let iconTargets: [(String, Int)] = [
         ("icon_16x16.png", 16),
         ("icon_16x16@2x.png", 32),
@@ -420,7 +425,7 @@ func main() throws {
         let rep = resizeRep(chosenHiRes, size: px)
         try savePNG(rep, to: appIconSetDir.appendingPathComponent(filename))
     }
-    print("Successfully rendered 4 native SwiftUI continuous-squircle variants and installed variant \(installVariant).")
+    print("Successfully rendered 4 native SwiftUI continuous-squircle variants and installed variant \(variant).")
 }
 
 try MainActor.assumeIsolated {

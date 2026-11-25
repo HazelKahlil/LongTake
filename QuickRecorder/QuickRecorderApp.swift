@@ -43,13 +43,53 @@ let previewWindow = FloatingHUDPanel(contentRect: NSRect(x: 0, y: 0, width: 266,
 let savingHUDPanel = FloatingHUDPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 52), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
 var updaterController: SPUStandardUpdaterController!
 
+final class SparkleUpdaterDelegate: NSObject, SPUUpdaterDelegate {
+    static let shared = SparkleUpdaterDelegate()
+    private let lock = NSLock()
+    private var pendingInstallHandler: (() -> Void)?
+
+    /// 录制或母带导出进行中时保存 Sparkle 安装句柄并推迟重启，待全部录制与导出彻底空闲后必然恢复执行
+    func updater(_ updater: SPUUpdater, shouldPostponeRelaunchForUpdate item: SUAppcastItem, untilInvokingBlock installHandler: @escaping () -> Void) -> Bool {
+        let busy = SCContext.isRecordingActive || AVOutputClass.shared.isRecordingDevice || SCContext.audioExportsInProgress > 0
+        guard busy else { return false }
+        lock.lock()
+        pendingInstallHandler = installHandler
+        lock.unlock()
+        SCContext.showNotification(
+            title: "更新已就绪",
+            body: "当前正在录制或导出音频，完成后将自动安装 LongTake 更新。",
+            id: "longtake.ota.postponed"
+        )
+        return true
+    }
+
+    func tryResumePendingInstallIfIdle() {
+        let busy = SCContext.isRecordingActive || AVOutputClass.shared.isRecordingDevice || SCContext.audioExportsInProgress > 0
+        guard !busy else { return }
+        lock.lock()
+        let handler = pendingInstallHandler
+        pendingInstallHandler = nil
+        lock.unlock()
+        if let handler = handler {
+            DispatchQueue.main.async {
+                handler()
+            }
+        }
+    }
+}
+
 @main
 struct QuickRecorderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
         
     init() {
-        // 本地定制版禁用 Sparkle 自动启动轮询, 防止被上游 QuickRecorder 覆盖导致 28B 缺陷复活
-        updaterController = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
+        // 清理旧版可能残留在 UserDefaults 的上游 SUFeedURL 覆盖项，确保严格指向 HazelKahlil/LongTake 官方 appcast
+        ud.removeObject(forKey: "SUFeedURL")
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: SparkleUpdaterDelegate.shared,
+            userDriverDelegate: nil
+        )
     }
     
     var body: some Scene {
@@ -109,6 +149,7 @@ extension Scene {
 class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOutput, AVCaptureVideoDataOutputSampleBufferDelegate  {
     static let shared = AppDelegate()
     var mainPanelWindow: EscPanel?
+    var activeAreaSessionID = UUID()
     var filter: SCContentFilter?
     var isCameraReady = false
     var isPresenterON = false
@@ -246,38 +287,78 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if pendingTermination { return .terminateNow }
+        // 正在等待封存期间若再次收到 Quit，继续保持 .terminateLater，绝不提前强杀（P0-4）
+        if pendingTermination { return .terminateLater }
 
-        let isRecording = SCContext.stream != nil || SCContext.streamType != nil
+        let isScreenOrAudioRecording = SCContext.isRecordingActive
+        let isDeviceRecording = AVOutputClass.shared.isRecordingDevice
         let exporting = SCContext.audioExportsInProgress > 0
-        if !isRecording && !exporting { return .terminateNow }
+        if !isScreenOrAudioRecording && !isDeviceRecording && !exporting {
+            return .terminateNow
+        }
 
         pendingTermination = true
+        SCContext.isTerminating = true
+        CountdownController.shared.cancel()
         showSavingHUD()
         SCContext.showNotification(title: "正在保存录音",
                                    body: "母带合成落盘后将自动退出，请勿强制关闭。",
                                    id: "quickrecorder.saving.onquit")
-        if isRecording {
-            SCContext.stopRecording()
-        }
 
         var replied = false
-        let finishQuit: () -> Void = {
+        let finishQuit: (Bool) -> Void = { shouldQuit in
             guard !replied else { return }
             replied = true
-            savingHUDPanel.orderOut(nil)
-            sender.reply(toApplicationShouldTerminate: true)
+            DispatchQueue.main.async {
+                savingHUDPanel.orderOut(nil)
+                if !shouldQuit {
+                    self.pendingTermination = false
+                    SCContext.isTerminating = false
+                }
+                sender.reply(toApplicationShouldTerminate: shouldQuit)
+            }
         }
-        SCContext.whenAudioExportsFinished(finishQuit)
-        // 安全阀: 最多等 10 分钟, 绝不无限期卡住退出
+
+        // 先登记一个保护计数，异步触发停止，避免在主线程阻塞导致 HUD 无法渲染
+        SCContext.beginAudioExport()
+        DispatchQueue.global(qos: .userInitiated).async {
+            if isDeviceRecording {
+                AVOutputClass.shared.stopRecording()
+            }
+            if isScreenOrAudioRecording {
+                let stopDone = DispatchGroup()
+                stopDone.enter()
+                SCContext.stopRecording {
+                    stopDone.leave()
+                }
+                stopDone.wait()
+            }
+            SCContext.endAudioExport()
+            SCContext.whenAudioExportsFinished {
+                finishQuit(true)
+            }
+        }
+
+        // 安全阀: 600 秒仍未完成时弹窗让用户决定继续等待或强制退出（待恢复清单已落盘）
         DispatchQueue.main.asyncAfter(deadline: .now() + 600) {
-            finishQuit()
+            guard !replied else { return }
+            let alert = createAlert(
+                title: "仍在封存录音文件",
+                message: "导出已持续 10 分钟，原始素材与恢复记录已保留。是否继续等待？",
+                button1: "继续等待",
+                button2: "立即退出"
+            )
+            if alert.runModal() == .alertSecondButtonReturn {
+                finishQuit(true)
+            }
         }
         return .terminateLater
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {
-        if SCContext.stream != nil { SCContext.stopRecording() }
+        CountdownController.shared.cancel()
+        if SCContext.isRecordingActive { SCContext.stopRecording() }
+        if AVOutputClass.shared.isRecordingDevice { AVOutputClass.shared.stopRecording() }
     }
     
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -435,35 +516,58 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
         
         KeyboardShortcuts.onKeyDown(for: .showPanel) {
             _ = self.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true)
-            if SCContext.stream == nil { NSApp.activate(ignoringOtherApps: true) }
+            if !SCContext.isRecordingActive { NSApp.activate(ignoringOtherApps: true) }
         }
-        KeyboardShortcuts.onKeyDown(for: .saveFrame) { if SCContext.stream != nil { SCContext.saveFrame = true }}
-        KeyboardShortcuts.onKeyDown(for: .screenMagnifier) { if SCContext.stream != nil { SCContext.isMagnifierEnabled.toggle() }}
-        KeyboardShortcuts.onKeyDown(for: .stop) { if SCContext.stream != nil { SCContext.stopRecording() }}
-        KeyboardShortcuts.onKeyDown(for: .pauseResume) { if SCContext.stream != nil { SCContext.pauseRecording() }}
-        KeyboardShortcuts.onKeyDown(for: .startWithAudio) {[self] in
-            if SCContext.streamType != nil { return }
-            closeAllWindow()
-            prepRecord(type: "audio", screens: SCContext.getSCDisplayWithMouse(), windows: nil, applications: nil, fastStart: true)
+        KeyboardShortcuts.onKeyDown(for: .saveFrame) { if SCContext.currentStream != nil { SCContext.saveFrame = true }}
+        KeyboardShortcuts.onKeyDown(for: .screenMagnifier) { if SCContext.currentStream != nil { SCContext.isMagnifierEnabled.toggle() }}
+        KeyboardShortcuts.onKeyDown(for: .stop) {
+            if AVOutputClass.shared.isRecordingDevice {
+                AVOutputClass.shared.stopRecording()
+            } else if SCContext.isRecordingActive {
+                SCContext.stopRecording()
+            }
         }
-        KeyboardShortcuts.onKeyDown(for: .startWithScreen) {[self] in
-            if SCContext.stream != nil { return }
+        KeyboardShortcuts.onKeyDown(for: .pauseResume) { if SCContext.isRecordingActive && SCContext.streamType != .idevice { SCContext.pauseRecording() }}
+        KeyboardShortcuts.onKeyDown(for: .startWithAudio) { [self] in
+            guard !SCContext.isRecordingActive && !AVOutputClass.shared.isRecordingDevice else { return }
             closeAllWindow()
-            prepRecord(type: "display", screens: SCContext.getSCDisplayWithMouse(), windows: nil, applications: nil, fastStart: true)
+            SCContext.updateAvailableContent {
+                DispatchQueue.main.async {
+                    guard let display = SCContext.getSCDisplayWithMouse() ?? SCContext.availableContent?.displays.first else { return }
+                    self.prepRecord(type: "audio", screens: display, windows: nil, applications: nil, fastStart: true)
+                }
+            }
         }
-        KeyboardShortcuts.onKeyDown(for: .startWithArea) {[self] in
-            if SCContext.stream != nil { return }
+        KeyboardShortcuts.onKeyDown(for: .startWithScreen) { [self] in
+            guard !SCContext.isRecordingActive && !AVOutputClass.shared.isRecordingDevice else { return }
             closeAllWindow()
-            showAreaSelector(size: NSSize(width: 600, height: 450))
+            SCContext.updateAvailableContent {
+                DispatchQueue.main.async {
+                    guard let display = SCContext.getSCDisplayWithMouse() ?? SCContext.availableContent?.displays.first else { return }
+                    self.prepRecord(type: "display", screens: display, windows: nil, applications: nil, fastStart: true)
+                }
+            }
+        }
+        KeyboardShortcuts.onKeyDown(for: .startWithArea) { [self] in
+            guard !SCContext.isRecordingActive && !AVOutputClass.shared.isRecordingDevice else { return }
+            closeAllWindow()
+            SCContext.updateAvailableContent {
+                DispatchQueue.main.async {
+                    self.showAreaSelector(size: NSSize(width: 600, height: 450))
+                }
+            }
         }
         KeyboardShortcuts.onKeyDown(for: .startWithWindow) { [self] in
-            if SCContext.stream != nil { return }
+            guard !SCContext.isRecordingActive && !AVOutputClass.shared.isRecordingDevice else { return }
             closeAllWindow()
-            let frontmostApp = NSWorkspace.shared.frontmostApplication
-            if let pid = frontmostApp?.processIdentifier {
-                guard let scWindow = SCContext.getWindows().first(where: { $0.owningApplication?.processID == pid && $0.title != "" && $0.isOnScreen }) else { return }
-                prepRecord(type: "window", screens: SCContext.getSCDisplayWithMouse(), windows: [scWindow], applications: nil, fastStart: true)
-                return
+            let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            SCContext.updateAvailableContent {
+                DispatchQueue.main.async {
+                    guard let pid = frontmostPID,
+                          let scWindow = SCContext.getWindows().first(where: { $0.owningApplication?.processID == pid && $0.title != "" && $0.isOnScreen }),
+                          let display = SCContext.getSCDisplayWithMouse() ?? SCContext.availableContent?.displays.first else { return }
+                    self.prepRecord(type: "window", screens: display, windows: [scWindow], applications: nil, fastStart: true)
+                }
             }
         }
         updateStatusBar()
@@ -487,9 +591,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
         PopoverState.shared.isShowing = false
 
         let targetScreen = SCContext.getScreenWithMouse() ?? NSScreen.main
-        let hosting = NSHostingView(rootView: ContentView())
+        let maxVisibleWidth = targetScreen?.visibleFrame.width ?? 1280
+        let compactMode = maxVisibleWidth < 920
+        let hosting = NSHostingView(rootView: ContentView(compactMode: compactMode))
         let fit = hosting.fittingSize
-        let panelWidth = max(880, fit.width)
+        let desiredWidth = max(compactMode ? 700 : 880, fit.width)
+        let panelWidth = min(desiredWidth, max(320, maxVisibleWidth - 16))
         let panelHeight = max(96, fit.height)
 
         let panel: EscPanel
@@ -521,15 +628,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
 
         if let screen = targetScreen {
             let visible = screen.visibleFrame
-            let wX = visible.minX + (visible.width - panelWidth) / 2
-            let wY = belowSettings
-                ? max(visible.minY + 28, visible.midY - 310)
-                : visible.minY + (visible.height - panelHeight) / 2
+            let minX = visible.minX + 8
+            let maxX = max(minX, visible.maxX - panelWidth - 8)
+            let minY = visible.minY + 8
+            let maxY = max(minY, visible.maxY - panelHeight - 8)
+            let wX = min(max(visible.minX + (visible.width - panelWidth) / 2, minX), maxX)
+            let wY = min(max(belowSettings ? max(visible.minY + 28, visible.midY - 310) : visible.minY + (visible.height - panelHeight) / 2, minY), maxY)
             // 若面板已在当前屏幕上且并非首次定位或设置页预览，则保留用户拖拽后的位置（安全钳制在可见区域内）
             if !belowSettings, panel.screen == screen, panel.frame.origin != .zero,
                visible.intersects(panel.frame) {
-                let clampedX = min(max(panel.frame.origin.x, visible.minX + 8), visible.maxX - panelWidth - 8)
-                let clampedY = min(max(panel.frame.origin.y, visible.minY + 8), visible.maxY - panelHeight - 8)
+                let clampedX = min(max(panel.frame.origin.x, minX), maxX)
+                let clampedY = min(max(panel.frame.origin.y, minY), maxY)
                 panel.setFrame(NSRect(x: clampedX, y: clampedY, width: panelWidth, height: panelHeight), display: true)
             } else {
                 panel.setFrame(NSRect(x: wX, y: wY, width: panelWidth, height: panelHeight), display: true)
@@ -538,9 +647,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, SCStreamDelegate, SCStreamOu
 
         if activateApp {
             NSApp.activate(ignoringOtherApps: true)
+            panel.orderFrontRegardless()
+            panel.makeKeyAndOrderFront(self)
+        } else {
+            // 设置页实时预览时不抢夺 Settings 的键盘焦点（P1-12）
+            panel.orderFront(nil)
         }
-        panel.orderFrontRegardless()
-        panel.makeKeyAndOrderFront(self)
     }
 
     func toggleMainPanel() {
@@ -606,12 +718,15 @@ func closeMainWindow() {
 }
 
 func closeAllWindow(except: String = "") {
+    if except != "Countdown Panel".local {
+        CountdownController.shared.cancel()
+    }
     AppDelegate.shared.mainPanelWindow?.orderOut(nil)
     for w in NSApp.windows.filter({
         $0.title != "Item-0" && $0.title != ""
         && $0.title != "Recording Controller".local
         && !$0.title.lowercased().contains(".qma")
-        && !$0.title.contains(except) }) {
+        && (except.isEmpty || !$0.title.contains(except)) }) {
         if w === AppDelegate.shared.mainPanelWindow || w === controlPanel || w === previewWindow || w === savingHUDPanel {
             w.orderOut(nil)
         } else {
@@ -767,9 +882,11 @@ extension NSImage {
                 windowIDs.append(windowID)
             }
         }
+        guard !windowIDs.isEmpty else { return nil }
         let pointer = UnsafeMutablePointer<UnsafeRawPointer?>.allocate(capacity: windowIDs.count)
+        defer { pointer.deallocate() }
         for (index, window) in windowIDs.enumerated() { pointer[index] = UnsafeRawPointer(bitPattern: UInt(window)) }
-        let cWindowIDArray: CFArray = CFArrayCreate(kCFAllocatorDefault, pointer, windowIDs.count, nil)
+        guard let cWindowIDArray: CFArray = CFArrayCreate(kCFAllocatorDefault, pointer, windowIDs.count, nil) else { return nil }
 
         guard let imageRef = CGImage(windowListFromArrayScreenBounds: CGRect.infinite, windowArray: cWindowIDArray, imageOption: []) else {
             print("No image available")

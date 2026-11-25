@@ -112,7 +112,8 @@ struct qmaPlayerView: View {
                                 .cornerRadius(6)
                                 .foregroundColor(.secondary.opacity(overExport ? 0.1 : 0.00001))
                             if audioPlayerManager.exporting {
-                                ActivityIndicator()
+                                ProgressView()
+                                    .controlSize(.small)
                             } else {
                                 Image(systemName: "square.and.arrow.up")
                                     .font(.system(size: 18))
@@ -248,10 +249,12 @@ struct PlayerSlider: View {
         GeometryReader { geometry in
             VStack(spacing: 2) {
                 HStack {
-                    Text("\(String(format: "%.2d:%.2d:%.2d", isDragging ? Int(temporaryPercentage * audioLength) / 3600 : Int(percentage * audioLength) / 3600, isDragging ? Int(temporaryPercentage * audioLength) / 60 : Int(percentage * audioLength) / 60, isDragging ? Int(temporaryPercentage * audioLength) % 60 : Int(percentage * audioLength) % 60))"
-                    ).foregroundColor(.secondary)
+                    let curSec = max(0, Int((isDragging ? temporaryPercentage : percentage) * audioLength))
+                    let totSec = max(0, Int(audioLength))
+                    Text(String(format: "%02d:%02d:%02d", curSec / 3600, (curSec % 3600) / 60, curSec % 60))
+                        .foregroundColor(.secondary)
                     Spacer()
-                    Text("\(String(format: "%.2d:%.2d:%.2d", Int(audioLength) / 3600, Int(audioLength) / 60, Int(audioLength) % 60))")
+                    Text(String(format: "%02d:%02d:%02d", totSec / 3600, (totSec % 3600) / 60, totSec % 60))
                         .foregroundColor(.secondary)
                 }
                 ZStack(alignment: .leading) {
@@ -417,7 +420,9 @@ class AudioPlayerManager: ObservableObject {
     private var playerNode2 = AVAudioPlayerNode()
     private var mixerNode = AVAudioMixerNode()
     private var timer: Timer?
-    private var lastStartFramePosition = AVAudioFramePosition(0.0)
+    private var delayedStopWorkItem: DispatchWorkItem?
+    private var playbackBaseTime: TimeInterval = 0.0
+    private var isPausedMidPlayback = false
     private var audioFile1: AVAudioFile?
     private var audioFile2: AVAudioFile?
     private var isSeeking = false
@@ -434,6 +439,11 @@ class AudioPlayerManager: ObservableObject {
         if !forOfflineExportOnly {
             setupAudioEngine()
         }
+    }
+
+    deinit {
+        stopProgressTimer()
+        delayedStopWorkItem?.cancel()
     }
     
     private func setupAudioEngine() {
@@ -462,7 +472,9 @@ class AudioPlayerManager: ObservableObject {
             audioFile1 = try AVAudioFile(forReading: package.appendingPathComponent("sys.\(format)"))
             audioFile2 = try AVAudioFile(forReading: package.appendingPathComponent("mic.\(format)"))
             
-            audioLength = Double(audioFile1?.length ?? 0) / (audioFile1?.processingFormat.sampleRate ?? 48000.0)
+            let dur1 = Double(audioFile1?.length ?? 0) / max(1.0, audioFile1?.processingFormat.sampleRate ?? 48000.0)
+            let dur2 = Double(audioFile2?.length ?? 0) / max(1.0, audioFile2?.processingFormat.sampleRate ?? 48000.0)
+            audioLength = max(dur1, dur2)
             
             updateSysVol()
             updateMicVol()
@@ -470,11 +482,29 @@ class AudioPlayerManager: ObservableObject {
             print("Error loading audio data: \(error)")
         }
     }
+
+    private func scheduleTrack(_ node: AVAudioPlayerNode, file: AVAudioFile, fromSeconds time: TimeInterval) {
+        let sr = max(1.0, file.processingFormat.sampleRate)
+        let startFrame = AVAudioFramePosition((max(0, time) * sr).rounded())
+        guard startFrame < file.length else { return }
+        let remaining = file.length - startFrame
+        let clampedCount = AVAudioFrameCount(min(AVAudioFramePosition(UInt32.max), remaining))
+        if clampedCount > 0 {
+            node.scheduleSegment(file, startingFrame: startFrame, frameCount: clampedCount, at: nil, completionHandler: nil)
+        }
+    }
     
     func play() {
         guard let audioFile1 = audioFile1, let audioFile2 = audioFile2 else { return }
-        playerNode1.scheduleFile(audioFile1, at: nil, completionHandler: nil)
-        playerNode2.scheduleFile(audioFile2, at: nil, completionHandler: nil)
+        delayedStopWorkItem?.cancel()
+        delayedStopWorkItem = nil
+        if !isPausedMidPlayback {
+            playerNode1.stop()
+            playerNode2.stop()
+            scheduleTrack(playerNode1, file: audioFile1, fromSeconds: playbackBaseTime)
+            scheduleTrack(playerNode2, file: audioFile2, fromSeconds: playbackBaseTime)
+        }
+        isPausedMidPlayback = false
         playerNode1.play()
         playerNode2.play()
         stopProgressTimer()
@@ -483,38 +513,46 @@ class AudioPlayerManager: ObservableObject {
     }
     
     func pause() {
+        delayedStopWorkItem?.cancel()
+        delayedStopWorkItem = nil
+        // AVAudioPlayerNode.pause() 保留既有 sampleTime 时间轴，绝不叠加回 playbackBaseTime 以免恢复后双倍计时
         playerNode1.pause()
         playerNode2.pause()
         stopProgressTimer()
+        isPausedMidPlayback = true
         isPlaying = false
     }
     
     func stop() {
+        delayedStopWorkItem?.cancel()
+        delayedStopWorkItem = nil
         playerNode1.stop()
         playerNode2.stop()
         stopProgressTimer()
-        lastStartFramePosition = AVAudioFramePosition(0.0)
+        playbackBaseTime = 0.0
+        isPausedMidPlayback = false
         progress = 0.0
         isPlaying = false
     }
     
     func seek(to time: Double) {
-        guard let audioFile1 = audioFile1, let audioFile2 = audioFile2 else { return }
+        guard let audioFile1 = audioFile1, let audioFile2 = audioFile2, audioLength > 0 else { return }
+        delayedStopWorkItem?.cancel()
+        delayedStopWorkItem = nil
         playerNode1.stop()
         playerNode2.stop()
         stopProgressTimer()
         
-        seekTime = time
+        let clampedTime = min(max(0.0, time), audioLength)
+        seekTime = clampedTime
+        playbackBaseTime = clampedTime
         isSeeking = true
+        isPausedMidPlayback = false
         
-        let startFrame = AVAudioFramePosition(seekTime * audioFile1.processingFormat.sampleRate)
-        let frameCount = AVAudioFrameCount(audioFile1.length - startFrame)
-        
-        if frameCount > 0 {
-            lastStartFramePosition = startFrame
-            playerNode1.scheduleSegment(audioFile1, startingFrame: startFrame, frameCount: frameCount, at: nil, completionHandler: nil)
-            playerNode2.scheduleSegment(audioFile2, startingFrame: startFrame, frameCount: frameCount, at: nil, completionHandler: nil)
-            progress = time / audioLength
+        if clampedTime < audioLength {
+            scheduleTrack(playerNode1, file: audioFile1, fromSeconds: clampedTime)
+            scheduleTrack(playerNode2, file: audioFile2, fromSeconds: clampedTime)
+            progress = clampedTime / audioLength
             if isPlaying || shouldPlay {
                 playerNode1.play()
                 playerNode2.play()
@@ -524,19 +562,31 @@ class AudioPlayerManager: ObservableObject {
         } else {
             stop()
         }
-        
-        
+    }
+
+    private func currentPlaybackSeconds() -> TimeInterval? {
+        // 优先使用仍处于有效播放进度的音轨节点时间
+        for (node, file) in [(playerNode1, audioFile1), (playerNode2, audioFile2)] {
+            guard file != nil,
+                  let lastRenderTime = node.lastRenderTime,
+                  let playerTime = node.playerTime(forNodeTime: lastRenderTime),
+                  playerTime.sampleRate > 0 else { continue }
+            return playbackBaseTime + Double(playerTime.sampleTime) / playerTime.sampleRate
+        }
+        return nil
     }
     
     private func startProgressTimer() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            if let lastRenderTime = self.playerNode1.lastRenderTime, let playerTime = self.playerNode1.playerTime(forNodeTime: lastRenderTime) {
-                let currentTime = Double(self.lastStartFramePosition + playerTime.sampleTime) / playerTime.sampleRate
-                self.progress = currentTime / self.audioLength
-                if currentTime > self.audioLength {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.stop()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self = self, self.audioLength > 0 else { return }
+            if let currentTime = self.currentPlaybackSeconds() {
+                self.progress = min(1.0, max(0.0, currentTime / self.audioLength))
+                if currentTime >= self.audioLength && self.delayedStopWorkItem == nil {
+                    let work = DispatchWorkItem { [weak self] in
+                        self?.stop()
                     }
+                    self.delayedStopWorkItem = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
                 }
             }
         }
@@ -650,7 +700,7 @@ class AudioPlayerManager: ObservableObject {
                 let micFramesAt48k = AVAudioFramePosition((Double(micFile.length) * renderSampleRate / max(1.0, micFile.processingFormat.sampleRate)).rounded(.up))
                 let totalFrames = max(AVAudioFramePosition(1024), max(sysFramesAt48k, micFramesAt48k))
 
-                let audioSettings = SCContext.updateAudioSettings(format: encoderSnapshot, rate: Int(renderSampleRate))
+                let audioSettings = SCContext.updateAudioSettings(format: encoderSnapshot, rate: Int(renderSampleRate), forVideo: false)
 
                 // 内部作用域确保 outputFile 在原子替换前彻底释放并完成 moov 索引写入
                 do {
@@ -662,7 +712,8 @@ class AudioPlayerManager: ObservableObject {
                     var stalledCount = 0
                     while offlineEngine.manualRenderingSampleTime < totalFrames {
                         let remaining = totalFrames - offlineEngine.manualRenderingSampleTime
-                        let framesToRender = min(UInt32(buffer.frameCapacity), UInt32(remaining))
+                        // 修复 P0-6：使用 64 位 AVAudioFramePosition 取最小值后再转 AVAudioFrameCount，避免 >24h51m 录音整数溢出崩溃
+                        let framesToRender = AVAudioFrameCount(min(AVAudioFramePosition(buffer.frameCapacity), remaining))
                         let status = try offlineEngine.renderOffline(framesToRender, to: buffer)
                         switch status {
                         case .success:
@@ -706,8 +757,9 @@ class AudioPlayerManager: ObservableObject {
                     mp3Done.wait()
                     if let err = mp3Error { throw err }
                     let mp3Size = (try? fd.attributesOfItem(atPath: stagingMP3URL.path)[.size] as? Int64) ?? 0
-                    guard mp3Size > 128 else {
-                        throw NSError(domain: "LongTakeExportError", code: 8, userInfo: [NSLocalizedDescriptionKey: "Encoded MP3 verification failed."])
+                    let verifiedMP3 = try? AVAudioFile(forReading: stagingMP3URL)
+                    guard mp3Size > 128, let decodedMP3 = verifiedMP3, decodedMP3.length > 0 else {
+                        throw NSError(domain: "LongTakeExportError", code: 8, userInfo: [NSLocalizedDescriptionKey: "Encoded MP3 verification failed (size: \(mp3Size)B)."])
                     }
                     if fd.fileExists(atPath: finalMP3URL.path) {
                         _ = try fd.replaceItemAt(finalMP3URL, withItemAt: stagingMP3URL)

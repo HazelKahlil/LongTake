@@ -12,6 +12,7 @@ import ScreenCaptureKit
 
 struct ContentView: View {
     var fromStatusBar = false
+    var compactMode = false
     @Environment(\.colorScheme) private var colorScheme
     @State private var xmarkGlowing = false
     @State private var gripHovering = false
@@ -114,32 +115,34 @@ struct ContentView: View {
                 .opacity(0.24)
                 .padding(.horizontal, 3)
 
-            // 6 项采集动作等高排布，零底部留白
+            // 6 项采集动作等高排布，零底部留白；窄屏自动收紧宽度避免裁切（P2-2）
+            let tileW: CGFloat = compactMode ? 68 : 88
+            let prefW: CGFloat = compactMode ? 64 : 80
             HStack(spacing: 2) {
                 if #available(macOS 13, *) {
                     Button(action: startSystemAudio) {
-                        SelectorView(title: "System Audio".local, symbol: "waveform", role: .primaryCapture, tileWidth: 88, tileHeight: 58)
+                        SelectorView(title: "System Audio".local, symbol: "waveform", role: .primaryCapture, tileWidth: tileW, tileHeight: 58)
                     }
                     .buttonStyle(SelectorTileButtonStyle())
                 }
                 Button(action: openScreenSelector) {
-                    SelectorView(title: "Screen".local, symbol: "display", tileWidth: 88, tileHeight: 58)
+                    SelectorView(title: "Screen".local, symbol: "display", tileWidth: tileW, tileHeight: 58)
                 }
                 .buttonStyle(SelectorTileButtonStyle())
                 Button(action: openAreaSelector) {
-                    SelectorView(title: "Screen Area".local, symbol: "viewfinder", tileWidth: 88, tileHeight: 58)
+                    SelectorView(title: "Screen Area".local, symbol: "viewfinder", tileWidth: tileW, tileHeight: 58)
                 }
                 .buttonStyle(SelectorTileButtonStyle())
                 Button(action: openAppSelector) {
-                    SelectorView(title: "Application".local, symbol: "macwindow.on.rectangle", tileWidth: 88, tileHeight: 58)
+                    SelectorView(title: "Application".local, symbol: "macwindow.on.rectangle", tileWidth: tileW, tileHeight: 58)
                 }
                 .buttonStyle(SelectorTileButtonStyle())
                 Button(action: openWinSelector) {
-                    SelectorView(title: "Window".local, symbol: "macwindow", tileWidth: 88, tileHeight: 58)
+                    SelectorView(title: "Window".local, symbol: "macwindow", tileWidth: tileW, tileHeight: 58)
                 }
                 .buttonStyle(SelectorTileButtonStyle())
                 Button(action: { isPopoverShowing = true }) {
-                    SelectorView(title: "Mobile Device".local, symbol: "ipad.and.iphone", tileWidth: 88, tileHeight: 58)
+                    SelectorView(title: "Mobile Device".local, symbol: "ipad.and.iphone", tileWidth: tileW, tileHeight: 58)
                 }
                 .buttonStyle(SelectorTileButtonStyle())
                 .popover(isPresented: $isPopoverShowing, arrowEdge: .bottom) {
@@ -158,7 +161,7 @@ struct ContentView: View {
                     closeMainWindow()
                     appDelegate.openSettingPanel()
                 }, label: {
-                    SelectorView(title: "Preferences".local, symbol: "slider.horizontal.3", tileWidth: 80, tileHeight: 58)
+                    SelectorView(title: "Preferences".local, symbol: "slider.horizontal.3", tileWidth: prefW, tileHeight: 58)
                 })
                 .buttonStyle(SelectorTileButtonStyle())
 
@@ -224,12 +227,15 @@ struct ContentView: View {
         closeMainWindow()
         SCContext.updateAvailableContent {
             DispatchQueue.main.async {
+                appDelegate.stopGlobalMouseMonitor()
                 appDelegate.showAreaSelector(size: NSSize(width: 600, height: 450))
-                var currentDisplay = SCContext.getSCDisplayWithMouse()
-                mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .rightMouseDown, .leftMouseDown, .otherMouseDown]) { event in
-                    let display = SCContext.getSCDisplayWithMouse()
-                    if display != currentDisplay {
-                        currentDisplay = display
+                var currentDisplayID = SCContext.getSCDisplayWithMouse()?.displayID
+                mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .rightMouseDown, .leftMouseDown, .otherMouseDown]) { _ in
+                    let displayID = SCContext.getSCDisplayWithMouse()?.displayID
+                    if displayID != nil && displayID != currentDisplayID {
+                        currentDisplayID = displayID
+                        // 更新会话令牌后再重建，避免旧面板的异步 onWindowClose 误关新屏幕遮罩（P1-10）
+                        appDelegate.activeAreaSessionID = UUID()
                         closeAllWindow()
                         appDelegate.showAreaSelector(size: NSSize(width: 600, height: 450))
                     }
@@ -393,7 +399,7 @@ struct MicGlassCapsule: View {
             Picker("", selection: $micDevice) {
                 Text("Default".local).tag("default")
                 ForEach(micList, id: \.uniqueID) { device in
-                    Text(device.localizedName).tag(device.localizedName)
+                    Text(device.localizedName).tag(device.uniqueID)
                 }
             }
             .labelsHidden()
@@ -407,8 +413,15 @@ struct MicGlassCapsule: View {
                 }
             }
             .onAppear {
-                let list = micList.map({ $0.localizedName })
-                if !list.contains(micDevice) { micDevice = "default" }
+                normalizeMicSelection()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .AVCaptureDeviceWasConnected)) { _ in
+                micList = SCContext.getMicrophone()
+                normalizeMicSelection()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .AVCaptureDeviceWasDisconnected)) { _ in
+                micList = SCContext.getMicrophone()
+                normalizeMicSelection()
             }
         }
         .padding(.horizontal, 10)
@@ -421,6 +434,17 @@ struct MicGlassCapsule: View {
                         .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.07), lineWidth: 0.6)
                 )
         )
+    }
+
+    private func normalizeMicSelection() {
+        if micDevice == "default" { return }
+        if micList.contains(where: { $0.uniqueID == micDevice }) { return }
+        let matchedByName = micList.filter { $0.localizedName == micDevice }
+        if matchedByName.count == 1, let single = matchedByName.first {
+            micDevice = single.uniqueID
+        } else {
+            micDevice = "default"
+        }
     }
 }
 
@@ -489,9 +513,46 @@ struct SelectorView: View {
     }
 }
 
+/// 统一管理倒计时令牌，任何关闭/取消/退出操作立即终止旧定时器，避免关窗后意外开始录制（P1-9）
+final class CountdownController {
+    static let shared = CountdownController()
+    private var activeToken: UUID?
+    private var timer: Timer?
+
+    func start(seconds: Int, onTick: @escaping (Int) -> Void, onComplete: @escaping () -> Void) -> UUID {
+        cancel()
+        let token = UUID()
+        activeToken = token
+        var remaining = seconds
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] t in
+            guard let self = self, self.activeToken == token else {
+                t.invalidate()
+                return
+            }
+            if remaining > 1 {
+                remaining -= 1
+                onTick(remaining)
+            } else {
+                self.cancel()
+                if let w = NSApp.windows.first(where: { $0.title == "Countdown Panel".local }) {
+                    w.orderOut(nil)
+                }
+                onComplete()
+            }
+        }
+        return token
+    }
+
+    func cancel() {
+        activeToken = nil
+        timer?.invalidate()
+        timer = nil
+    }
+}
+
 struct CountdownView: View {
-    @State var countdownValue: Int = 00
-    @State private var timer: Timer?
+    @State var countdownValue: Int = 0
+    @State private var token: UUID?
     var atEnd: () -> Void
 
     var body: some View {
@@ -502,11 +563,11 @@ struct CountdownView: View {
                 .foregroundColor(.white)
                 .offset(y: -10)
             Button(action: {
-                timer?.invalidate()
+                CountdownController.shared.cancel()
                 for w in NSApp.windows.filter({
                     $0.title == "Countdown Panel".local ||
                     $0.title == "Area Overlayer".local
-                }) { w.close() }
+                }) { w.orderOut(nil) }
             }, label: {
                 ZStack {
                     Color.white.opacity(0.2)
@@ -518,17 +579,16 @@ struct CountdownView: View {
         }
         .frame(width: 120, height: 120)
         .cornerRadius(10)
-        .onAppear{
-            timer?.invalidate()
-            timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
-                if countdownValue > 1 {
-                    countdownValue -= 1
-                } else {
-                    timer.invalidate()
-                    if let w = NSApp.windows.first(where: { $0.title == "Countdown Panel".local }) { w.close() }
-                    atEnd()
-                }
-            }
+        .onAppear {
+            token = CountdownController.shared.start(
+                seconds: countdownValue,
+                onTick: { newVal in countdownValue = newVal },
+                onComplete: { atEnd() }
+            )
+        }
+        .onDisappear {
+            CountdownController.shared.cancel()
+            token = nil
         }
     }
 }
@@ -538,14 +598,14 @@ extension AppDelegate {
     func showAreaSelector(size: NSSize, noPanel: Bool = false) {
         guard let scDisplay = SCContext.getSCDisplayWithMouse() else { return }
         guard let screen = scDisplay.nsScreen else { return }
+        let sessionToken = activeAreaSessionID
         let screenshotWindow = ScreenshotWindow(contentRect: screen.frame, backing: .buffered, defer: false, size: size, force: noPanel)
         screenshotWindow.title = "Area Selector".local
-        //screenshotWindow.orderFront(self)
         screenshotWindow.orderFrontRegardless()
         if !noPanel {
             let wX = (screen.frame.width - 790) / 2 + screen.frame.minX
             let wY = screen.visibleFrame.minY + 80
-            let contentView = NSHostingView(rootView: AreaSelector(screen: scDisplay))
+            let contentView = NSHostingView(rootView: AreaSelector(screen: scDisplay, sessionToken: sessionToken))
             contentView.frame = NSRect(x: wX, y: wY, width: 790, height: 90)
             contentView.focusRingType = .none
             let areaPanel = NSPanel(contentRect: contentView.frame, styleMask: [.fullSizeContentView, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -559,20 +619,20 @@ extension AppDelegate {
             areaPanel.isReleasedWhenClosed = false
             areaPanel.titlebarAppearsTransparent = true
             areaPanel.isMovableByWindowBackground = true
-            //areaPanel.setFrameOrigin(NSPoint(x: wX, y: wY))
             areaPanel.orderFront(self)
         }
     }
     
     func createCountdownPanel(screen: SCDisplay, action: @escaping () -> Void) {
         guard let screen = screen.nsScreen else { return }
+        CountdownController.shared.cancel()
         let countdown = ud.integer(forKey: "countdown")
-        if countdown == 0 {
+        if countdown <= 0 {
             action()
         } else {
             let wX = (screen.frame.width - 120) / 2 + screen.frame.minX
             let wY = (screen.frame.height - 120) / 2 + screen.frame.minY
-            let frame =  NSRect(x: wX, y: wY, width: 120, height: 120)
+            let frame = NSRect(x: wX, y: wY, width: 120, height: 120)
             let contentView = NSHostingView(rootView: CountdownView(countdownValue: countdown, atEnd: action))
             contentView.frame = frame
             countdownPanel.contentView = contentView

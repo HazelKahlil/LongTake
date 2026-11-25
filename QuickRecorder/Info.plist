@@ -6,6 +6,12 @@
 	<string>LongTake</string>
 	<key>CFBundleName</key>
 	<string>LongTake</string>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/HazelKahlil/LongTake/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>5uvwqThgtCVPF9/PUgRfx0BXh0PUANP/2N+L0Ae1btY=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>LongTake needs this permission to record your camera and mobile device.</string>
 	<key>NSMicrophoneUsageDescription</key>
@@ -35,7 +41,7 @@
 			<key>CFBundleTypeIconFile</key>
 			<string>qmaIcon</string>
 			<key>CFBundleTypeName</key>
-			<string>QuickRecorder Multi-Track Audio</string>
+			<string>LongTake Multi-Track Audio</string>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
 			<key>LSHandlerRank</key>
@@ -60,7 +66,7 @@
 				<string>com.apple.package</string>
 			</array>
 			<key>UTTypeDescription</key>
-			<string>QuickRecorder Multi-Track Audio</string>
+			<string>LongTake Multi-Track Audio</string>
 			<key>UTTypeIcons</key>
 			<dict>
 				<key>UTTypeIconBadgeName</key>

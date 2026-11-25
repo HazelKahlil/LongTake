@@ -63,7 +63,7 @@ struct resizeView: View {
             }
             HStack(spacing: 4) {
                 Text("Output Size:")
-                let scale = Int(screen.nsScreen!.backingScaleFactor)
+                let scale = Int(screen?.nsScreen?.backingScaleFactor ?? 1.0)
                 Text(" \(highRes == 2 ? areaWidth * scale : areaWidth) x \(highRes == 2 ? areaHeight * scale : areaHeight)")
             }
         }.onAppear{ focusedField = .width }
@@ -82,6 +82,7 @@ struct AreaSelector: View {
     @State private var nsWindow: NSWindow?
     
     var screen: SCDisplay!
+    var sessionToken: UUID = AppDelegate.shared.activeAreaSessionID
     var appDelegate = AppDelegate.shared
     
     var body: some View {
@@ -208,6 +209,8 @@ struct AreaSelector: View {
         .frame(width: 790, height: 90)
         .background(WindowAccessor(onWindowOpen: { w in nsWindow = w }, onWindowClose: {
             DispatchQueue.main.async {
+                // 仅在仍属当前区域选择代际时清理，防止双屏切换时旧面板误关新遮罩和全局监听器（P1-10）
+                guard appDelegate.activeAreaSessionID == sessionToken else { return }
                 for w in NSApp.windows.filter({ $0.title == "Area Selector".local }) { w.close() }
                 if let monitor = keyMonitor {
                     NSEvent.removeMonitor(monitor)
@@ -283,11 +286,11 @@ class ScreenshotOverlayView: NSView {
         super.viewDidMoveToWindow()
         selectionRect = NSRect(x: (self.frame.width - size.width) / 2, y: (self.frame.height - size.height) / 2, width: size.width, height: size.height)
         if !force {
-            let savedArea = ud.object(forKey: "savedArea") as! [String: [String: CGFloat]]
-            if let name = self.window?.screen?.localizedName {
-                if let area = savedArea[name] {
-                    selectionRect = NSRect(x: area["x"]!, y: area["y"]!, width: area["width"]!, height: area["height"]!)
-                }
+            if let savedArea = ud.object(forKey: "savedArea") as? [String: [String: CGFloat]],
+               let name = self.window?.screen?.localizedName,
+               let area = savedArea[name],
+               let x = area["x"], let y = area["y"], let w = area["width"], let h = area["height"] {
+                selectionRect = NSRect(x: x, y: y, width: w, height: h)
             }
         }
         if self.window != nil {

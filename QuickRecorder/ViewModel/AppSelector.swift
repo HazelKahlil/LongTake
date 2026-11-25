@@ -161,10 +161,12 @@ struct AppSelector: View {
     }
     
     func startRecording() {
+        guard let targetDisplay = display ?? SCContext.getSCDisplayWithMouse() ?? SCContext.availableContent?.displays.first,
+              !selected.isEmpty else { return }
         closeAllWindow()
-        appDelegate.createCountdownPanel(screen: display) {
+        appDelegate.createCountdownPanel(screen: targetDisplay) {
             SCContext.autoStop = autoStop
-            appDelegate.prepRecord(type: "application", screens: display, windows: nil, applications: selected)
+            appDelegate.prepRecord(type: "application", screens: targetDisplay, windows: nil, applications: selected)
         }
     }
 }
@@ -331,17 +333,28 @@ struct OptionsView: View {
                         .disabled(micList.isEmpty)
                         Picker("", selection: $micDevice) {
                             Text("Default".local).tag("default")
-                            ForEach(micList, id: \.self) { device in
-                                Text(device.localizedName).tag(device.localizedName)
+                            ForEach(micList, id: \.uniqueID) { device in
+                                Text(device.localizedName).tag(device.uniqueID)
                             }
                         }
                         .disabled(!recordMic)
                         .scaleEffect(isMacOS12 ? 1 : 0.8)
                         .padding(.leading, isMacOS12 ? -7 : -16)
-                        .frame(width: 90, height: isMacOS12 ? 20 :12)
-                        .onAppear{
-                            let list = micList.map({ $0.localizedName })
-                            if !list.contains(micDevice) { micDevice = "default" }
+                        .frame(width: 90, height: isMacOS12 ? 20 : 12)
+                        .onAppear {
+                            if micDevice != "default" && !micList.contains(where: { $0.uniqueID == micDevice }) {
+                                let byName = micList.filter { $0.localizedName == micDevice }
+                                micDevice = (byName.count == 1) ? byName[0].uniqueID : "default"
+                            }
+                        }
+                        .onReceive(NotificationCenter.default.publisher(for: .AVCaptureDeviceWasConnected)) { _ in
+                            micList = SCContext.getMicrophone()
+                        }
+                        .onReceive(NotificationCenter.default.publisher(for: .AVCaptureDeviceWasDisconnected)) { _ in
+                            micList = SCContext.getMicrophone()
+                            if micDevice != "default" && !micList.contains(where: { $0.uniqueID == micDevice }) {
+                                micDevice = "default"
+                            }
                         }
                         Spacer().frame(width: 5)
                         if micDevice != "default" && enableAEC{
