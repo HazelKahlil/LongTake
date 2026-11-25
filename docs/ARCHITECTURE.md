@@ -1,6 +1,14 @@
-# LongTake 架构与第一性原理根因审计（v1.6）
+# LongTake 架构与第一性原理根因审计（v1.7）
 
-> 本地母带级录音与录屏工具（基于 QuickRecorder `e820517` 深度重构）。本文档记录了从症状表象溯源至系统根因的 9 项核心修复、原生界面设计思路与开源构建注意事项。
+> 本地母带级录音与录屏工具（基于 QuickRecorder `e820517` 深度重构）。本文档记录了从症状表象溯源至系统根因的核心修复、v1.7 GPT 审查闭环与自托管 Sparkle 2.10.1 OTA 架构。
+
+## 0. v1.7 深度安全与并发加固（GPT 审查闭环）
+
+- **会话隔离与回调排空（P0-1）**：引入 `RecordingSession` 与串行 `SCContext.sessionQueue`，先停止 `SCStream` 与冻结的 `MicBackend`、排空回调队列，再执行 `markAsFinished` / `finishWriting` / 关闭 `AVAudioFile`；`didStopWithError` 校验流身份防旧流误杀新录制。
+- **三路统一时间轴与安全重映射（P0-2）**：画面、系统音、默认/指定/AEC 麦克风共享同一单调时钟累计暂停偏移；`adjustTime` 按 `entriesNeededOut` 动态分配并校验全部 CoreMedia 状态，默认麦克风 tap 采用实际采集 `AVAudioTime.hostTime`。
+- **零冲突命名、拷贝落盘与 >24h 溢出防线（P0-3 / P0-5 / P0-6）**：`allocateUniqueFilePath` / `nonCollidingDestinationURL` 杜绝同秒覆写；`CMSampleBuffer.writePCM(to:)` 在 `withAudioBufferList` 借用期内拷贝落盘；离线混音以 64 位 `AVAudioFramePosition` 限幅防 `UInt32` 溢出。
+- **全链路退出保护与零 TOCTOU 竞态（P0-4 / P1-1）**：普通视频、双轨音频、iPhone `AVCaptureMovieFileOutput` 与导出全部纳入 `beginAudioExport/endAudioExport`；`whenAudioExportsFinished` 合并至单一临界区；重复 ⌘Q 维持 `.terminateLater`，600s 超时改为用户确认弹窗。
+- **Sparkle 2.10.1 自托管 EdDSA OTA（P0-8 / P1-12）**：升级 Sparkle `2.6.0 → 2.10.1`（修复 `GHSA-3x7w-j75x-ppq5`），配置 LongTake 独立 EdDSA 密钥（`SUPublicEDKey`）与 `HazelKahlil/LongTake/appcast.xml`，启动前清理残留 `SUFeedURL` 默认项，并通过 `SparkleUpdaterDelegate` 在录制/导出中自动推迟安装重启。
 
 ---
 

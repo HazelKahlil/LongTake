@@ -163,56 +163,80 @@ struct ScreenSelector: View {
 
 class ScreenSelectorViewModel: NSObject, ObservableObject, SCStreamDelegate, SCStreamOutput {
     @Published var screenThumbnails = [ScreenThumbnail]()
-    private var allScreens = [SCDisplay]()
-    private var streams = [SCStream]()
-    
+    private var generation: UInt64 = 0
+    private var streamTargets = [ObjectIdentifier: (stream: SCStream, display: SCDisplay, gen: UInt64)]()
+
     override init() {
         super.init()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             self.setupStreams()
         }
     }
-    
+
+    deinit {
+        stopAllStreams()
+    }
+
+    private func stopAllStreams() {
+        let active = streamTargets.values.map { $0.stream }
+        streamTargets.removeAll()
+        for s in active {
+            s.stopCapture { _ in }
+        }
+    }
+
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        if CMSampleBufferGetImageBuffer(sampleBuffer) == nil { return }
-        var nsImage = sampleBuffer.nsImage
-        if let index = self.streams.firstIndex(of: stream), index + 1 <= self.allScreens.count {
-            if nsImage == nil { nsImage = SCContext.getWallpaper(self.allScreens[index]) ?? NSImage.unknowScreen }
-            let currentScreen = self.allScreens[index]
-            let thumbnail = ScreenThumbnail(image: nsImage!, screen: currentScreen)
-            DispatchQueue.main.async {
-                if !self.screenThumbnails.contains(where: { $0.screen == currentScreen }) { self.screenThumbnails.append(thumbnail) }
-            }
-            self.streams[index].stopCapture()
+        guard CMSampleBufferGetImageBuffer(sampleBuffer) != nil else { return }
+        let key = ObjectIdentifier(stream)
+        guard let entry = streamTargets.removeValue(forKey: key) else {
+            stream.stopCapture { _ in }
+            return
+        }
+        stream.stopCapture { _ in }
+        guard entry.gen == generation else { return }
+
+        let currentScreen = entry.display
+        let nsImage = sampleBuffer.nsImage ?? SCContext.getWallpaper(currentScreen) ?? NSImage.unknowScreen
+        let thumbnail = ScreenThumbnail(image: nsImage, screen: currentScreen)
+        if !self.screenThumbnails.contains(where: { $0.screen.displayID == currentScreen.displayID }) {
+            self.screenThumbnails.append(thumbnail)
         }
     }
 
     func setupStreams() {
         SCContext.updateAvailableContent {
-            Task {
-                do {
-                    self.streams.removeAll()
-                    DispatchQueue.main.async { self.screenThumbnails.removeAll() }
-                    guard let screens = SCContext.availableContent?.displays else { return }
-                    self.allScreens = screens
-                    let qrSelf = SCContext.getSelf()
-                    let contentFilters = self.allScreens.map { SCContentFilter(display: $0, excludingApplications: qrSelf != nil ? [qrSelf!] : [], exceptingWindows: []) }
-                    for (index, contentFilter) in contentFilters.enumerated() {
+            DispatchQueue.main.async {
+                self.generation &+= 1
+                let currentGen = self.generation
+                self.stopAllStreams()
+                self.screenThumbnails.removeAll()
+                guard let screens = SCContext.availableContent?.displays else { return }
+                let qrSelf = SCContext.getSelf()
+
+                Task { @MainActor in
+                    for d in screens {
+                        guard self.generation == currentGen else { break }
+                        let contentFilter = SCContentFilter(display: d, excludingApplications: qrSelf != nil ? [qrSelf!] : [], exceptingWindows: [])
                         let streamConfiguration = SCStreamConfiguration()
-                        streamConfiguration.width = Int(self.allScreens[index].frame.width)
-                        streamConfiguration.height = Int(self.allScreens[index].frame.height)
-                        streamConfiguration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(1))
+                        streamConfiguration.width = max(2, Int(d.frame.width))
+                        streamConfiguration.height = max(2, Int(d.frame.height))
+                        streamConfiguration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
                         streamConfiguration.pixelFormat = kCVPixelFormatType_32BGRA
                         if #available(macOS 13, *) { streamConfiguration.capturesAudio = false }
                         streamConfiguration.showsCursor = false
                         streamConfiguration.queueDepth = 3
+
                         let stream = SCStream(filter: contentFilter, configuration: streamConfiguration, delegate: self)
-                        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .main)
-                        try await stream.startCapture()
-                        self.streams.append(stream)
+                        let key = ObjectIdentifier(stream)
+                        self.streamTargets[key] = (stream, d, currentGen)
+                        do {
+                            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .main)
+                            try await stream.startCapture()
+                        } catch {
+                            self.streamTargets.removeValue(forKey: key)
+                            print("Get screenshot error：\(error)")
+                        }
                     }
-                } catch {
-                    print("Get screenshot error：\(error)")
                 }
             }
         }

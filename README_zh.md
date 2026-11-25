@@ -18,8 +18,8 @@
 - **同步等待 `AVAssetWriter` 落盘**：`systemaudio` 停止录制时通过 `DispatchGroup` 同步等待麦克风轨完成 `moov` 索引写入，避免立即混音打开 44B 未封口文件；录制期启用 5 秒分片检查点与串行音频写入队列。
 - **完全隔离的离线混音引擎**：导出 `.qma` 时新建独立离线 `AVAudioEngine`（不绑定物理输出设备），杜绝蓝牙/耳机切换导致的 100% CPU 死循环；双轨采样统一换算至 48 kHz 取最大时长，避免系统静音截断人声。
 - **Write-Ahead 原子暂存与退出保护**：先写隐藏暂存文件并校验字节数与可读帧数 `> 0`，再原子替换至目标文件；4 条异步导出链路全量纳入 `.terminateLater` 退出保护（带悬浮提示 HUD）与异常退出后自愈队列。
-- **暂停时长与双轨时间戳同步**：修复暂停恢复计时跳秒偏差，并在双轨系统录音模式下扣除累计暂停时长，多次暂停仍保持音画同步。
-- **权限零骚扰策略**：启动改用静默 `CGPreflightScreenCaptureAccess()`，移除被拒后每秒递归重试逻辑，并禁用上游 Sparkle 自动更新以防覆盖本地构建。
+- **统一单调时钟暂停同步 & 会话级串行隔离**：视频、系统音与麦克风三路共享同一单调时钟暂停偏移；停止录制时先停止采集生产者并排空串行回调队列，再封存 `AVAssetWriter`，杜绝停录竞态、悬空 PCM 缓冲与 >24h 帧数溢出。
+- **权限零骚扰与专属 Sparkle 2.10.1 OTA**：启动静默预检权限；内置独立 EdDSA 签名密钥的 **Sparkle 2.10.1** 自托管更新通道（`HazelKahlil/LongTake/appcast.xml`），并在录制或母带导出进行中自动推迟安装重启。
 
 ### 2. 原生 macOS 26/27 Liquid Glass 界面与双通道控制
 - **单行连贯高对比主控制栏**：将 **「录制麦克风 + 原生输入设备选择」** 独立置于最前端，接续 6 项等高采集动作、「偏好设置」与关闭按钮，彻底消除下方大块空白。
@@ -67,7 +67,13 @@ xcodebuild -project QuickRecorder.xcodeproj -scheme QuickRecorder \
 swift scripts/verify-audio-pipeline.swift
 ```
 
-如需在本地覆盖安装并持久化 macOS TCC 录屏/麦克风权限，请使用个人钥匙串中的 `Apple Development` 证书由内向外签名（`Sparkle.framework` 内 XPC/Helper -> `Sparkle.framework` -> `KeyboardShortcuts` bundle -> 主程序带上 `QuickRecorder/QuickRecorder.entitlements`，不使用 `--options runtime`）。
+如需在本地完成由内向外签名、持久化 TCC 权限，并生成带 EdDSA 签名的 Sparkle OTA 归档与 `appcast.xml`，运行：
+
+```bash
+./scripts/release-ota.sh --install-local
+```
+
+> **签名分发说明**：本机 `Apple Development` 证书签名已可在本机完整走通 Sparkle EdDSA OTA 更新；若面向外部公开用户的未授权 Mac 免 Gatekeeper 弹窗分发，请使用 `Developer ID Application` 证书（`--sign-identity "Developer ID Application: ..."`）并配合 `xcrun notarytool` 完成公证。
 
 ---
 

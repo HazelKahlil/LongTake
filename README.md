@@ -18,8 +18,9 @@
 - **Synchronized Mic `AVAssetWriter` Finalization**: Waits deterministically (`DispatchGroup`) for `mic.m4a` `moov` atom completion before mixing `.qma` packages, plus 5-second `movieFragmentInterval` checkpoints and thread-safe serial system audio writing.
 - **Isolated Offline `AVAudioEngine` Rendering**: Mixes `.qma` tracks through an isolated manual-rendering engine decoupled from physical audio hardware — switching headphones or Bluetooth devices mid-export will never hang CPU at 100%. Duration uses `max(sysFrames, micFrames)` normalized to 48 kHz.
 - **Write-Ahead Atomic Staging + Crash Self-Healing**: Writes mixed outputs to `.longtake-staging-<UUID>.m4a`, validates non-zero readable frames, and atomically replaces the target path. Tracks all 4 async export pipelines with `.terminateLater` quit protection HUD and crash-only pending remux recovery.
-- **Pause/Resume PTS & Timer Sync**: Deducts cumulative pause intervals across both system audio and microphone streams so long paused sessions stay lip-synced.
-- **No Infinite Permission Retry Loops**: Checks `CGPreflightScreenCaptureAccess()` silently at startup instead of looping every second on `SCShareableContent`.
+- **Pause/Resume PTS & Timer Sync**: Deducts a unified monotonic pause offset across video, system audio, and microphone streams (preserving real `AVAudioTime` capture timestamps and CoreMedia `entriesNeededOut` timing arrays).
+- **Session-Isolated Recording Engine & Zero-Copy Safety**: Isolates each capture session with serial callback draining before `AVAssetWriter.finishWriting`, deep-copies PCM buffers inside `withAudioBufferList`, clamps >24h offline mixing in 64-bit `AVAudioFramePosition`, allocates collision-free output paths, and protects normal video, dual-track audio, and mobile-device recordings on Quit.
+- **No Infinite Permission Retry Loops & Self-Hosted Sparkle 2.10.1 OTA**: Checks `CGPreflightScreenCaptureAccess()` silently at startup and ships a dedicated EdDSA-signed Sparkle 2.10.1 OTA channel (`HazelKahlil/LongTake/appcast.xml`) that automatically defers update relaunches while recording or exporting.
 
 ### Native macOS 26/27 Liquid Glass UI & Ergonomics
 - **High-Contrast Single-Row Control Bar**: Unified horizontal bar placing the **Microphone toggle + native input device `Picker`** first, followed by 6 equal-height capture actions, `Preferences`, and `Close`.
@@ -67,7 +68,13 @@ xcodebuild -project QuickRecorder.xcodeproj -scheme QuickRecorder \
 swift scripts/verify-audio-pipeline.swift
 ```
 
-To preserve macOS TCC Screen Recording & Microphone permissions across rebuilds on your own Mac, sign inside-out (`Sparkle.framework` helpers -> `Sparkle.framework` -> `KeyboardShortcuts` bundle -> `.app` with `QuickRecorder/QuickRecorder.entitlements`, without `--options runtime` for local dev certs) using your own `Apple Development` certificate in Keychain.
+To preserve macOS TCC Screen Recording & Microphone permissions across rebuilds and publish a signed Sparkle OTA release (`dist/LongTake-<ver>-macOS.zip` + EdDSA-signed `appcast.xml`), run:
+
+```bash
+./scripts/release-ota.sh --install-local
+```
+
+> **Note on distribution signing**: Local builds signed with an `Apple Development` certificate support Sparkle EdDSA OTA updates seamlessly on your own authorized Mac; for Gatekeeper-clean public distribution to third-party Macs without manual approval, pass a `Developer ID Application` identity (`--sign-identity "Developer ID Application: ..."`) and notarize the ZIP archive via `xcrun notarytool`.
 
 ---
 

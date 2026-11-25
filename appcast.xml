@@ -1,0 +1,30 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>LongTake Updates</title>
+    <link>https://github.com/HazelKahlil/LongTake</link>
+    <description>Crash-resilient macOS screen &amp; dual-track audio recorder updates</description>
+    <language>zh-cn</language>
+    <item>
+      <title>LongTake 1.7</title>
+      <pubDate>Wed, 25 Nov 2026 03:53:11 +0000</pubDate>
+      <sparkle:version>206</sparkle:version>
+      <sparkle:shortVersionString>1.7</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>12.3</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <h2>LongTake v1.7 (Build 206)</h2>
+        <ul>
+          <li>Session-isolated recording state machine &amp; callback draining before AVAssetWriter finalization</li>
+          <li>Unified monotonic pause/resume timeline across video, system audio, and microphone</li>
+          <li>Zero-copy buffer use-after-free fix, 64-bit &gt;24h offline mixing, collision-free file allocation, and full Quit protection</li>
+          <li>Sparkle 2.10.1 self-hosted EdDSA OTA channel for HazelKahlil/LongTake with active-recording relaunch guard</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/HazelKahlil/LongTake/releases/download/v1.7/LongTake-1.7-macOS.zip"
+        sparkle:edSignature="VhfHvrmYa0jqK02bdtpQx61bbBz+d1lIdtAfXf7bs/oM+9irTRDzawLa2UVAmm+ftXGbYc7kd42mHyLUala+Bg=="
+        length="5076084"
+        type="application/octet-stream" />
+    </item>
+  </channel>
+</rss>

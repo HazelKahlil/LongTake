@@ -66,6 +66,7 @@
 "Video" = "视频设置";
 "Save" = "保存位置";
 "Exclude QuickRecorder itself" = "排除 LongTake 窗口";
+"Exclude LongTake itself" = "排除 LongTake 窗口";
 "Highlight the Mouse Cursor" = "高亮显示鼠标指针";
 "Not available for \"Single Window Capture\"" = "此功能在录制单个窗口时不可用";
 "Normal - 128Kbps" = "标准 - 128Kbps";
@@ -137,6 +138,8 @@
 "Connect your device via USB" = "请通过 USB 连接您的设备";
 "Show QuickRecorder on Dock" = "在程序坞中显示 LongTake";
 "Show QuickRecorder on Menu Bar" = "在菜单栏中显示 LongTake";
+"Show LongTake on Dock" = "在程序坞中显示 LongTake";
+"Show LongTake on Menu Bar" = "在菜单栏中显示 LongTake";
 "Icon Settings" = "图标设置";
 "Still Processing" = "仍在处理";
 "Mixing audio track..." = "正在混缩音轨...";

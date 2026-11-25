@@ -71,7 +71,7 @@ struct GeneralView: View {
                 .frame(height: 20)
                 SDivider()
                 SButton("Preview Main Panel", buttonTitle: "Open Main Panel") {
-                    AppDelegate.shared.presentMainPanel(belowSettings: true)
+                    AppDelegate.shared.presentMainPanel(belowSettings: true, activateApp: false)
                 }
             }
             SGroupBox(label: "Startup") {
@@ -90,23 +90,26 @@ struct GeneralView: View {
                         }
                     SDivider()
                 }
-                SToggle("Show QuickRecorder on Dock", isOn: $showOnDock)
+                SToggle("Show LongTake on Dock", isOn: $showOnDock)
                     //.disabled(!showMenubar)
                 SDivider()
-                SToggle("Show QuickRecorder on Menu Bar", isOn: $showMenubar)
+                SToggle("Show LongTake on Menu Bar", isOn: $showMenubar)
                     //.disabled(!showOnDock)
             }
-            VStack(spacing: 6) {
-                if let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
-                    Text("LongTake v\(appVersion)")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundColor(.primary)
+            SGroupBox(label: "Update") {
+                UpdaterSettingsView(updater: updaterController.updater)
+                SDivider()
+                HStack {
+                    if let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+                        let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+                        Text("LongTake v\(appVersion) (\(buildNumber))")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundColor(.primary)
+                    }
+                    Spacer()
+                    CheckForUpdatesView(updater: updaterController.updater)
                 }
-                Text("本地母带定制版 · 已锁定上游自动更新")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
-            .padding(.top, 8)
         }
         .onAppear{ if #available(macOS 13, *) { launchAtLogin = (SMAppService.mainApp.status == .enabled) }}
         .onChange(of: showMenubar) { _ in updateStatusBar() }
@@ -166,7 +169,7 @@ struct RecorderView: View {
                 SToggle("Open video trimmer after recording", isOn: $trimAfterRecord)
             }
             SGroupBox {
-                SToggle("Exclude QuickRecorder itself", isOn: $hideSelf)
+                SToggle("Exclude LongTake itself", isOn: $hideSelf)
                 SDivider()
                 if #available (macOS 13, *) {
                     SToggle("Include Menu Bar in Recording", isOn: $includeMenuBar)
@@ -248,7 +251,7 @@ struct OutputView: View {
             }
             SGroupBox(label: "Save") {
                 SItem(label: "Output Folder") {
-                    Text(String(format: "Currently set to \"%@\"".local, saveDirectory!.lastPathComponent))
+                    Text(String(format: "Currently set to \"%@\"".local, SCContext.defaultSaveDirectory().lastPathComponent))
                         .font(.footnote)
                         .foregroundColor(Color.secondary)
                         .lineLimit(1)

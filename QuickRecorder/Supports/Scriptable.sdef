@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
-<dictionary title="QuickRecorder Scriptable">
-    <suite name="QuickRecorder Scripting" code="QKrd" description="QuickRecorder commands">
+<dictionary title="LongTake Scriptable">
+    <suite name="LongTake Scripting" code="QKrd" description="LongTake commands">
         <command name="record screen" code="QKrdSlsn" description="Select screen to record">
             <cocoa class="QuickRecorder.selectScreen"/>
             <parameter name="numbered" code="NUMb" type="integer" description="Screen number" optional="yes">

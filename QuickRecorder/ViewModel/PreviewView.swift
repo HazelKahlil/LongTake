@@ -11,14 +11,20 @@ import Combine
 struct PreviewView: View {
     let frame: NSImage
     let filePath: String
+    let previewID: UUID
     private let sharingDelegate = SharingServicePickerDelegate()
     @State private var isHovered: Bool = false
     @State private var isHovered2: Bool = false
     @State private var isSharing: Bool = false
     @State private var nsWindow: NSWindow?
     @State private var opacity: Double = 0.0
-    @AppStorage("trimAfterRecord")  private var trimAfterRecord: Bool = false
-    
+    @State private var dismissWorkItem: DispatchWorkItem?
+    @AppStorage("trimAfterRecord") private var trimAfterRecord: Bool = false
+
+    private var isVideoFile: Bool {
+        ["mp4", "mov"].contains(filePath.pathExtension.lowercased())
+    }
+
     var body: some View {
         ZStack(alignment: Alignment(horizontal: .leading, vertical: .top)) {
             ZStack {
@@ -74,15 +80,19 @@ struct PreviewView: View {
         .background(WindowAccessor(onWindowOpen: { w in nsWindow = w }))
         .onAppear {
             withAnimation(.easeIn(duration: 0.3)) { opacity = 1.0 }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-                if !isHovered && !isSharing { closeWindow() }
-            }
+            scheduleAutoDismiss()
+        }
+        .onDisappear {
+            dismissWorkItem?.cancel()
+            dismissWorkItem = nil
+            sharingDelegate.onDidChooseService = nil
         }
         .onChange(of: isHovered) { newValue in
-            if !newValue {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-                    if !isHovered && !isSharing { closeWindow() }
-                }
+            if newValue {
+                dismissWorkItem?.cancel()
+                dismissWorkItem = nil
+            } else {
+                scheduleAutoDismiss()
             }
         }
         .contextMenu {
@@ -94,9 +104,10 @@ struct PreviewView: View {
             }
             Button("Delete") {
                 do {
-                    try fd.removeItem(atPath: filePath)
+                    // 移至废纸篓而非永久 unlink，避免误删整包 .qma 母带（P1-8）
+                    try fd.trashItem(at: filePath.url, resultingItemURL: nil)
                 } catch {
-                    print("Failed to delete file: \(error.localizedDescription)")
+                    print("Failed to move file to Trash: \(error.localizedDescription)")
                 }
                 closeWindow()
             }
@@ -111,7 +122,7 @@ struct PreviewView: View {
             }
             Button("共享...") { showSharingServicePicker(for: filePath.url) }
             Divider()
-            if !trimAfterRecord {
+            if !trimAfterRecord && isVideoFile {
                 Button("Trim") {
                     if fd.fileExists(atPath: filePath) {
                         AppDelegate.shared.createNewWindow(view: VideoTrimmerView(videoURL: filePath.url), title: filePath.lastPathComponent, only: false)
@@ -119,21 +130,19 @@ struct PreviewView: View {
                     closeWindow()
                 }
             }
-            if #available(macOS 13, *) {
-                if ["mp4", "mov"].contains(filePath.pathExtension) {
-                    Button("Make GIF") {
-                        if isAppInstalled(id: "com.sindresorhus.Gifski") {
-                            makeGif()
-                            closeWindow()
-                        } else {
-                            let alert = createAlert(title: "Gifski not found",
-                                                    message: "Please install \"Gifski\" first to make GIF!",
-                                                    button1: "Open App Store", button2: "Cancel").runModal()
-                            if alert == .alertFirstButtonReturn { openURL("https://apps.apple.com/app/id1351639930") }
-                        }
+            if #available(macOS 13, *), isVideoFile {
+                Button("Make GIF") {
+                    if isAppInstalled(id: "com.sindresorhus.Gifski") {
+                        makeGif()
+                        closeWindow()
+                    } else {
+                        let alert = createAlert(title: "Gifski not found",
+                                                message: "Please install \"Gifski\" first to make GIF!",
+                                                button1: "Open App Store", button2: "Cancel").runModal()
+                        if alert == .alertFirstButtonReturn { openURL("https://apps.apple.com/app/id1351639930") }
                     }
-                    Divider()
                 }
+                Divider()
             }
             Button("Open Main Panel") {
                 closeWindow()
@@ -142,56 +151,76 @@ struct PreviewView: View {
             Button("Close") { closeWindow() }
         }
     }
-    
+
+    private func scheduleAutoDismiss() {
+        dismissWorkItem?.cancel()
+        let currentID = previewID
+        let work = DispatchWorkItem {
+            guard SCContext.currentPreviewID == currentID else { return }
+            if !isHovered && !isSharing {
+                closeWindow()
+            }
+        }
+        dismissWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
+    }
+
     func openURL(_ urlString: String) {
         if let url = URL(string: urlString) {
             NSWorkspace.shared.open(url)
         }
     }
-    
+
     private func closeWindow() {
+        dismissWorkItem?.cancel()
+        dismissWorkItem = nil
+        let currentID = previewID
         withAnimation(.easeIn(duration: 0.2)) { opacity = 0.0 }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            // 仅在仍属于本次预览代际时隐藏复用窗口，绝不误关新弹出的预览（P1-8）
+            guard SCContext.currentPreviewID == currentID else { return }
             nsWindow?.orderOut(nil)
         }
     }
-    
+
     private func isAppInstalled(id: String) -> Bool {
         return NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) != nil
     }
-    
+
     private func makeGif() {
         let task = Process()
         task.arguments = ["-b", "com.sindresorhus.Gifski", filePath]
         task.launchPath = "/usr/bin/open"
-        task.launch()
+        try? task.run()
     }
-    
+
     private func showSharingServicePicker(for url: URL) {
-        if let window = nsWindow {
-            isSharing = true
-            sharingDelegate.onDidChooseService = { service in
-                isSharing = false
-                if service != nil {
-                    DispatchQueue.main.async { closeWindow() }
-                } else {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-                        if !isHovered && !isSharing { closeWindow() }
-                    }
-                }
+        guard let window = nsWindow, let contentView = window.contentView else { return }
+        dismissWorkItem?.cancel()
+        dismissWorkItem = nil
+        isSharing = true
+        sharingDelegate.onDidChooseService = { service in
+            // 触发后立即解除回调，防止循环引用（P2-3）
+            sharingDelegate.onDidChooseService = nil
+            isSharing = false
+            if service != nil {
+                DispatchQueue.main.async { closeWindow() }
+            } else {
+                scheduleAutoDismiss()
             }
-            let sharingPicker = NSSharingServicePicker(items: [url])
-            sharingPicker.delegate = sharingDelegate
-            sharingPicker.show(relativeTo: .zero, of: window.contentView!, preferredEdge: .minY)
         }
+        let sharingPicker = NSSharingServicePicker(items: [url])
+        sharingPicker.delegate = sharingDelegate
+        sharingPicker.show(relativeTo: .zero, of: contentView, preferredEdge: .minY)
     }
 }
 
-// 自定义 NSSharingServicePickerDelegate
 class SharingServicePickerDelegate: NSObject, NSSharingServicePickerDelegate {
     var onDidChooseService: ((NSSharingService?) -> Void)?
-    
+
     func sharingServicePicker(_ sharingServicePicker: NSSharingServicePicker, didChoose service: NSSharingService?) {
-        onDidChooseService?(service)
+        let cb = onDidChooseService
+        onDidChooseService = nil
+        cb?(service)
     }
 }

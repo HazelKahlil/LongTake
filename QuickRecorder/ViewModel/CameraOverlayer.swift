@@ -57,7 +57,9 @@ class CameraNSView: NSView {
     }
     
     private func setupCaptureSession() {
-        if type == .idevice { session = SCContext.previewSession }
+        session = (type == .idevice)
+            ? (AVOutputClass.shared.activeDevicePreviewSession ?? SCContext.previewSession)
+            : (AVOutputClass.shared.activeCameraSession ?? SCContext.captureSession)
         guard let session = session else { return }
         previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer!.frame = bounds
@@ -210,9 +212,7 @@ struct CameraPopoverView: View {
                         }
                         SCContext.recordDevice = devices[index].localizedName
                         AVOutputClass.shared.closePreview()
-                        DispatchQueue.global().async {
-                            AVOutputClass.shared.startRecording(with: devices[index], mute: true, didOutput: false)
-                        }
+                        AVOutputClass.shared.startRecording(with: devices[index], mute: true, didOutput: false)
                     }, label: {
                         HStack {
                             ZStack {

@@ -1,8 +1,8 @@
 //
 //  WindowAccessor.swift
-//  xHistory
+//  LongTake
 //
-//  Created by apple on 2024/11/7.
+//  使用 scoped NSWindow Notification 替代覆写 window.delegate，保留 SwiftUI Settings / DocumentGroup 原生代理（P2-3）
 //
 
 import AppKit
@@ -16,13 +16,13 @@ struct WindowAccessor: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
+        let coordinator = context.coordinator
         DispatchQueue.main.async {
             if let window = view.window {
-                window.delegate = context.coordinator
-                context.coordinator.window = window
-                self.onWindowOpen?(window)
+                coordinator.attach(to: window)
+                coordinator.onWindowOpen?(window)
             } else {
-                self.onWindowOpen?(nil)
+                coordinator.onWindowOpen?(nil)
             }
         }
         return view
@@ -39,33 +39,58 @@ struct WindowAccessor: NSViewRepresentable {
         )
     }
 
-    class Coordinator: NSObject, NSWindowDelegate {
-        weak var window: NSWindow? // 使用 weak 避免循环引用
+    final class Coordinator: NSObject {
+        weak var window: NSWindow?
         var onWindowOpen: ((NSWindow?) -> Void)?
         var onWindowActive: ((NSWindow?) -> Void)?
         var onWindowDeactivate: ((NSWindow?) -> Void)?
         var onWindowClose: (() -> Void)?
+        private var observers: [NSObjectProtocol] = []
 
-        init(onWindowOpen: ((NSWindow?) -> Void)? = nil,
-             onWindowActive: ((NSWindow?) -> Void)? = nil,
-             onWindowDeactivate: ((NSWindow?) -> Void)? = nil,
-             onWindowClose: (() -> Void)? = nil) {
+        init(
+            onWindowOpen: ((NSWindow?) -> Void)? = nil,
+            onWindowActive: ((NSWindow?) -> Void)? = nil,
+            onWindowDeactivate: ((NSWindow?) -> Void)? = nil,
+            onWindowClose: (() -> Void)? = nil
+        ) {
             self.onWindowOpen = onWindowOpen
-            self.onWindowClose = onWindowClose
             self.onWindowActive = onWindowActive
             self.onWindowDeactivate = onWindowDeactivate
+            self.onWindowClose = onWindowClose
         }
 
-        func windowWillClose(_ notification: Notification) {
-            onWindowClose?()
-        }
-        
-        func windowDidBecomeKey(_ notification: Notification) {
-            onWindowActive?(window)
+        func attach(to window: NSWindow) {
+            guard self.window !== window else { return }
+            removeObservers()
+            self.window = window
+            let nc = NotificationCenter.default
+            observers.append(
+                nc.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+                    self?.onWindowClose?()
+                }
+            )
+            observers.append(
+                nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
+                    self?.onWindowActive?(self?.window)
+                }
+            )
+            observers.append(
+                nc.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+                    self?.onWindowDeactivate?(self?.window)
+                }
+            )
         }
 
-        func windowDidResignKey(_ notification: Notification) {
-            onWindowDeactivate?(window)
+        private func removeObservers() {
+            let nc = NotificationCenter.default
+            for obs in observers {
+                nc.removeObserver(obs)
+            }
+            observers.removeAll()
+        }
+
+        deinit {
+            removeObservers()
         }
     }
 }

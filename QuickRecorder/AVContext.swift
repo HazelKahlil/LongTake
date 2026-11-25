@@ -4,6 +4,7 @@
 //
 //  Created by apple on 2024/4/27.
 //
+
 import AppKit
 import Foundation
 import AVFoundation
@@ -11,144 +12,307 @@ import UserNotifications
 
 extension AppDelegate {
     func recordingCamera(with device: AVCaptureDevice) {
-        SCContext.captureSession = AVCaptureSession()
-        
-        guard let input = try? AVCaptureDeviceInput(device: device),
-              SCContext.captureSession.canAddInput(input) else {
-            print("Failed to set up camera")
-            SCContext.requestCameraPermission()
-            return
-        }
-        SCContext.captureSession.addInput(input)
-        
-        let videoOutput = AVCaptureVideoDataOutput()
-        videoOutput.setSampleBufferDelegate(self, queue: .global())
-        
-        if SCContext.captureSession.canAddOutput(videoOutput) {
-            SCContext.captureSession.addOutput(videoOutput)
-        }
-        
-        SCContext.captureSession.startRunning()
-        DispatchQueue.main.async { self.startCameraOverlayer() }
+        AVOutputClass.shared.startCameraOverlay(with: device)
     }
-    
+
     func closeCamera() {
-        if SCContext.isCameraRunning() {
-            //SCContext.previewType = nil
-            if camWindow.isVisible { camWindow.close() }
-            SCContext.captureSession.stopRunning()
-        }
+        AVOutputClass.shared.stopCameraOverlay()
     }
-    
+
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        /* 保留后续以作他用
-        if !SCContext.isPaused && ud.string(forKey: "recordCam") != "" {
-            if sampleBuffer.isValid { SCContext.isCameraReady = true }
-            if sampleBuffer.imageBuffer != nil { SCContext.frameCache = sampleBuffer }
-        }*/
+        // 保留 delegate 协议实现
     }
 }
 
+/// 隔离管理摄像头叠层、移动设备叠层与移动设备录屏三个独立会话，杜绝共享会话覆盖与 Quit 提前截断（P0-4 / P1-11）
 class AVOutputClass: NSObject, AVCaptureFileOutputRecordingDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
     static let shared = AVOutputClass()
-    var output: AVCaptureMovieFileOutput!
-    var dataOutput: AVCaptureVideoDataOutput!
-    //var captureSession: AVCaptureSession!
-    
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        //print(sampleBuffer.nsImage?.size)
+
+    private let sessionQueue = DispatchQueue(label: "com.kahlilhazel.longtake.avSessions")
+    private var cameraOverlaySession: AVCaptureSession?
+    private var iDeviceCaptureSession: AVCaptureSession?
+    private var iDevicePreviewSession: AVCaptureSession?
+    private var output: AVCaptureMovieFileOutput?
+    private var dataOutput: AVCaptureVideoDataOutput?
+
+    private var cameraGeneration: UInt64 = 0
+    private var deviceGeneration: UInt64 = 0
+    private var isStoppingDeviceRecording = false
+    private var activeDeviceRecordingPath: String?
+
+    var activeCameraSession: AVCaptureSession? {
+        sessionQueue.sync { cameraOverlaySession }
     }
-    
-    public func startRecording(with device: AVCaptureDevice, mute: Bool = false, preset: AVCaptureSession.Preset = .high, didOutput: Bool = true) {
-        output = AVCaptureMovieFileOutput()
-        dataOutput = AVCaptureVideoDataOutput()
-        dataOutput.setSampleBufferDelegate(self, queue: .global())
-        SCContext.captureSession = AVCaptureSession()
-        SCContext.previewSession = AVCaptureSession()
-        SCContext.captureSession.sessionPreset = preset
-        SCContext.previewSession.sessionPreset = preset
-        
-        guard let input = try? AVCaptureDeviceInput(device: device),
-              let preview = try? AVCaptureDeviceInput(device: device),
-              SCContext.captureSession.canAddInput(input),
-              SCContext.previewSession.canAddInput(preview),
-              SCContext.captureSession.canAddOutput(output),
-              SCContext.previewSession.canAddOutput(dataOutput) else {
-            print("Failed to set up camera or device")
-            SCContext.requestCameraPermission()
-            return
+
+    var activeDevicePreviewSession: AVCaptureSession? {
+        sessionQueue.sync { iDevicePreviewSession }
+    }
+
+    var isRecordingDevice: Bool {
+        sessionQueue.sync { output?.isRecording == true || isStoppingDeviceRecording }
+    }
+
+    func isAnyCameraOrDeviceActive() -> Bool {
+        sessionQueue.sync {
+            (cameraOverlaySession?.isRunning == true) ||
+            (iDeviceCaptureSession?.isRunning == true) ||
+            (iDevicePreviewSession?.isRunning == true)
         }
-        
-        SCContext.captureSession.addInput(input)
-        SCContext.captureSession.addOutput(output)
-        SCContext.previewSession.addInput(preview)
-        SCContext.previewSession.addOutput(dataOutput)
-        
-        if mute {
-            if let audioConnection = output.connection(with: .audio) {
-                SCContext.captureSession.removeConnection(audioConnection)
-                /*DispatchQueue.main.async {
-                    let alert = createAlert(title: "No Audio Connection",
-                                                               message: "Unable to get audio stream on this device, only screen content will be recorded!",
-                                                               button1: "OK")
-                    alert.runModal()
-                }*/
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {}
+
+    // MARK: - 独立摄像头叠层
+
+    func startCameraOverlay(with device: AVCaptureDevice) {
+        sessionQueue.async {
+            self.cameraGeneration &+= 1
+            let gen = self.cameraGeneration
+            self.teardownCameraOverlayOnQueue()
+
+            let session = AVCaptureSession()
+            guard let input = try? AVCaptureDeviceInput(device: device),
+                  session.canAddInput(input) else {
+                print("Failed to set up camera")
+                SCContext.requestCameraPermission()
+                return
+            }
+            session.addInput(input)
+            self.cameraOverlaySession = session
+            SCContext.captureSession = session
+            session.startRunning()
+
+            DispatchQueue.main.async {
+                let stillValid = self.sessionQueue.sync { self.cameraGeneration == gen && self.cameraOverlaySession === session }
+                guard stillValid else { return }
+                AppDelegate.shared.startCameraOverlayer()
             }
         }
-        
-        if didOutput {
-            let encoderIsH265 = ud.string(forKey: "encoder") == Encoder.h265.rawValue
-            let videoSettings: [String: Any] = [ AVVideoCodecKey: encoderIsH265 ? AVVideoCodecType.hevc : AVVideoCodecType.h264 ]
-            guard let connection = output.connection(with: .video) else { return }
-            output.setOutputSettings(videoSettings, for: connection)
-            let fileEnding = ud.string(forKey: "videoFormat") ?? ""
-            SCContext.filePath = "\(SCContext.getFilePath()).\(fileEnding)"
-            SCContext.captureSession.startRunning()
-            output.startRecording(to: SCContext.filePath.url, recordingDelegate: self)
-            SCContext.streamType = StreamType.idevice
-            SCContext.startTime = Date.now
+    }
+
+    func stopCameraOverlay() {
+        sessionQueue.async {
+            self.cameraGeneration &+= 1
+            self.teardownCameraOverlayOnQueue()
         }
-        
-        SCContext.previewSession.startRunning()
         DispatchQueue.main.async {
-            closeAllWindow(except: "Area Overlayer".local)
-            updateStatusBar()
-            AppDelegate.shared.startDeviceOverlayer(size: NSSize(width: 300, height: 500))
+            if camWindow.isVisible { camWindow.close() }
+        }
+    }
+
+    private func teardownCameraOverlayOnQueue() {
+        if let session = cameraOverlaySession {
+            if session.isRunning { session.stopRunning() }
+            cameraOverlaySession = nil
+        }
+    }
+
+    // MARK: - 独立移动设备录制 / 预览叠层
+
+    public func startRecording(with device: AVCaptureDevice, mute: Bool = false, preset: AVCaptureSession.Preset = .high, didOutput: Bool = true) {
+        if SCContext.isTerminating { return }
+        sessionQueue.async {
+            self.deviceGeneration &+= 1
+            let gen = self.deviceGeneration
+            self.teardownDeviceSessionsOnQueue()
+
+            let previewSession = AVCaptureSession()
+            previewSession.sessionPreset = preset
+            let dataOut = AVCaptureVideoDataOutput()
+            dataOut.setSampleBufferDelegate(self, queue: DispatchQueue.global(qos: .utility))
+
+            guard let previewInput = try? AVCaptureDeviceInput(device: device),
+                  previewSession.canAddInput(previewInput),
+                  previewSession.canAddOutput(dataOut) else {
+                print("Failed to set up mobile device preview")
+                SCContext.requestCameraPermission()
+                return
+            }
+            previewSession.addInput(previewInput)
+            previewSession.addOutput(dataOut)
+            self.iDevicePreviewSession = previewSession
+            self.dataOutput = dataOut
+            SCContext.previewSession = previewSession
+
+            if didOutput {
+                let captureSession = AVCaptureSession()
+                captureSession.sessionPreset = preset
+                let movieOut = AVCaptureMovieFileOutput()
+                guard let capInput = try? AVCaptureDeviceInput(device: device),
+                      captureSession.canAddInput(capInput),
+                      captureSession.canAddOutput(movieOut) else {
+                    print("Failed to set up mobile device capture")
+                    self.teardownDeviceSessionsOnQueue()
+                    SCContext.requestCameraPermission()
+                    return
+                }
+                captureSession.addInput(capInput)
+                captureSession.addOutput(movieOut)
+
+                if mute, let audioConnection = movieOut.connection(with: .audio) {
+                    captureSession.removeConnection(audioConnection)
+                }
+
+                guard let connection = movieOut.connection(with: .video) else {
+                    self.teardownDeviceSessionsOnQueue()
+                    return
+                }
+                let encoderIsH265 = ud.string(forKey: "encoder") == Encoder.h265.rawValue
+                let videoSettings: [String: Any] = [AVVideoCodecKey: encoderIsH265 ? AVVideoCodecType.hevc : AVVideoCodecType.h264]
+                movieOut.setOutputSettings(videoSettings, for: connection)
+
+                let rawExt = (ud.string(forKey: "videoFormat") ?? VideoFormat.mp4.rawValue).lowercased()
+                let fileEnding = rawExt == VideoFormat.mov.rawValue ? VideoFormat.mov.rawValue : VideoFormat.mp4.rawValue
+                let uniquePath = "\(SCContext.allocateUniqueFilePath(extensions: [fileEnding])).\(fileEnding)"
+
+                self.iDeviceCaptureSession = captureSession
+                self.output = movieOut
+                self.activeDeviceRecordingPath = uniquePath
+                self.isStoppingDeviceRecording = false
+
+                SCContext.sessionQueue.sync {
+                    SCContext.filePath = uniquePath
+                    SCContext.streamType = .idevice
+                    SCContext.startTime = Date.now
+                }
+
+                captureSession.startRunning()
+                movieOut.startRecording(to: uniquePath.url, recordingDelegate: self)
+            }
+
+            previewSession.startRunning()
+
+            DispatchQueue.main.async {
+                let stillValid = self.sessionQueue.sync { self.deviceGeneration == gen && self.iDevicePreviewSession === previewSession }
+                guard stillValid else { return }
+                if didOutput {
+                    closeAllWindow(except: "Area Overlayer".local)
+                    updateStatusBar()
+                }
+                AppDelegate.shared.startDeviceOverlayer(size: NSSize(width: 300, height: 500))
+            }
         }
     }
 
     public func stopRecording() {
-        if SCContext.captureSession.isRunning {
-            output.stopRecording()
-            SCContext.captureSession.stopRunning()
-            SCContext.previewSession.stopRunning()
-            SCContext.streamType = nil
-            SCContext.startTime = nil
+        // 同步在 sessionQueue 登记导出保护，确保调用方（尤其是 Quit）在函数返回前即可见进行中的封存任务
+        let movieOutToStop: AVCaptureMovieFileOutput? = sessionQueue.sync {
+            guard !self.isStoppingDeviceRecording else { return nil }
+            if let movieOut = self.output, movieOut.isRecording {
+                self.isStoppingDeviceRecording = true
+                SCContext.beginAudioExport()
+                return movieOut
+            }
+            self.teardownDeviceSessionsOnQueue()
+            return nil
+        }
+
+        if let movieOut = movieOutToStop {
+            sessionQueue.async {
+                movieOut.stopRecording()
+            }
+        } else {
+            SCContext.sessionQueue.sync {
+                if SCContext.streamType == .idevice {
+                    SCContext.streamType = nil
+                    SCContext.startTime = nil
+                }
+            }
             DispatchQueue.main.async {
-                controlPanel.close()
+                controlPanel.orderOut(nil)
                 deviceWindow.close()
                 updateStatusBar()
+                SparkleUpdaterDelegate.shared.tryResumePendingInstallIfIdle()
             }
         }
     }
-    
+
     func closePreview() {
-        if SCContext.isCameraRunning() {
-            //SCContext.previewType = nil
+        sessionQueue.async {
+            self.deviceGeneration &+= 1
+            if let preview = self.iDevicePreviewSession {
+                if preview.isRunning { preview.stopRunning() }
+                self.iDevicePreviewSession = nil
+            }
+            self.dataOutput = nil
+            SCContext.previewSession = nil
+        }
+        DispatchQueue.main.async {
             if deviceWindow.isVisible { deviceWindow.close() }
-            if let preview = SCContext.previewSession { preview.stopRunning() }
         }
     }
 
-    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
-        let content = UNMutableNotificationContent()
-        content.title = "Recording Completed".local
-        content.body = String(format: "File saved to: %@".local, outputFileURL.path)
-        content.sound = UNNotificationSound.default
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
-        let request = UNNotificationRequest(identifier: "quickrecorder.completed.\(UUID().uuidString)", content: content, trigger: trigger)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error { print("Notification failed to send：\(error.localizedDescription)") }
+    func stopAuxiliaryOverlays() {
+        stopCameraOverlay()
+        if !isRecordingDevice {
+            closePreview()
         }
+    }
+
+    private func teardownDeviceSessionsOnQueue() {
+        if let cap = iDeviceCaptureSession {
+            if cap.isRunning { cap.stopRunning() }
+            iDeviceCaptureSession = nil
+        }
+        if let preview = iDevicePreviewSession {
+            if preview.isRunning { preview.stopRunning() }
+            iDevicePreviewSession = nil
+        }
+        output = nil
+        dataOutput = nil
+        activeDeviceRecordingPath = nil
+        SCContext.previewSession = nil
+    }
+
+    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
+        let wasTrackedStop: Bool = sessionQueue.sync {
+            let tracked = self.isStoppingDeviceRecording
+            self.isStoppingDeviceRecording = false
+            self.teardownDeviceSessionsOnQueue()
+            return tracked
+        }
+
+        SCContext.sessionQueue.sync {
+            if SCContext.streamType == .idevice {
+                SCContext.streamType = nil
+                SCContext.startTime = nil
+            }
+        }
+
+        DispatchQueue.main.async {
+            controlPanel.orderOut(nil)
+            deviceWindow.close()
+            updateStatusBar()
+        }
+
+        // 校验 error 与 AVErrorRecordingSuccessfullyFinishedKey，避免拔线失败时误报“录制完成”（P1-11）
+        let succeeded: Bool
+        if let err = error as NSError? {
+            succeeded = (err.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) == true
+        } else {
+            succeeded = true
+        }
+
+        if succeeded {
+            SCContext.showNotification(
+                title: "Recording Completed".local,
+                body: String(format: "File saved to: %@".local, outputFileURL.path),
+                id: "quickrecorder.completed.\(UUID().uuidString)"
+            )
+            DispatchQueue.main.async {
+                SCContext.showPreview(path: outputFileURL.path)
+            }
+        } else {
+            SCContext.showNotification(
+                title: "Failed to save file".local,
+                body: error?.localizedDescription ?? "Mobile device recording interrupted.",
+                id: "quickrecorder.error.\(UUID().uuidString)"
+            )
+        }
+
+        if wasTrackedStop {
+            SCContext.endAudioExport()
+        }
+        SparkleUpdaterDelegate.shared.tryResumePendingInstallIfIdle()
     }
 }

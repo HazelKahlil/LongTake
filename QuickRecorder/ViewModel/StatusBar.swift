@@ -88,7 +88,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
         wasRecording = isRecording
 
-        if !isRecording {
+        if !isRecording && !AVOutputClass.shared.isRecordingDevice {
             stopTickTimer()
             controlPanel.orderOut(nil)
             closePopovers()
@@ -401,6 +401,13 @@ struct FloatingRecordingPillView: View {
             : Color(red: 0.976, green: 0.973, blue: 0.964)
     }
 
+    private var pausedAccentColor: Color {
+        colorScheme == .dark ? Color.orange : Color(red: 0.78, green: 0.38, blue: 0.0)
+    }
+
+    /// 录制胶囊固定高对比底色，不随主面板透明度滑杆过度透明（P2-1）
+    private let pillBackingOpacity: Double = 0.94
+
     var body: some View {
         let shape = Capsule()
         let content = pillContent
@@ -411,7 +418,7 @@ struct FloatingRecordingPillView: View {
                     .background {
                         shape
                             .inset(by: 0.5)
-                            .fill(backingColor.opacity(max(0.92, panelOpacity)))
+                            .fill(backingColor.opacity(pillBackingOpacity))
                     }
                     .overlay {
                         shape
@@ -426,7 +433,7 @@ struct FloatingRecordingPillView: View {
                 content
                     .background {
                         shape.fill(.thickMaterial)
-                        shape.fill(backingColor.opacity(max(0.92, panelOpacity)))
+                        shape.fill(backingColor.opacity(pillBackingOpacity))
                     }
                     .overlay {
                         shape
@@ -479,7 +486,7 @@ struct FloatingRecordingPillView: View {
 
                 Text(popoverState.isPaused ? "已暂停" : "录制中")
                     .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(popoverState.isPaused ? Color.orange : Color.primary.opacity(0.88))
+                    .foregroundStyle(popoverState.isPaused ? pausedAccentColor : Color.primary.opacity(0.88))
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
 
@@ -512,7 +519,7 @@ struct FloatingRecordingPillView: View {
                     }
                     .foregroundStyle(
                         popoverState.isPaused
-                            ? (colorScheme == .dark ? Color.orange : Color(red: 0.78, green: 0.38, blue: 0.0))
+                            ? pausedAccentColor
                             : Color.primary.opacity(0.92)
                     )
                     .padding(.horizontal, 12)
